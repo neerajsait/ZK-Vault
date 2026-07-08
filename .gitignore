@@ -1,0 +1,34 @@
+# Environment
+.env
+
+# Logs
+*.log
+app.log
+
+# Temporary/Test files
+mysql.txt
+test_app.py
+test&wipe.py
+wipe_db.py
+project_structure.txt
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual Environments
+venv/
+.venv/
+env/
+
+# Node
+node_modules/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

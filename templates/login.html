@@ -1,0 +1,170 @@
+{% extends "base.html" %}
+
+{% block title %}Login — ZK Vault{% endblock %}
+
+{% block content %}
+<div class="auth-layout">
+    <div class="auth-card">
+        <div class="card-icon">◆</div>
+        <h2>Authenticate</h2>
+
+        {% if step == 'otp' %}
+            <p class="card-subtitle">Enter the 6‑digit code sent to <strong>{{ email }}</strong>.</p>
+            <form id="login-otp-form" method="post" action="{{ url_for('verify_login') }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <input type="hidden" name="email" value="{{ email }}">
+                <div class="form-group">
+                    <label for="otp">Verification Code</label>
+                    <input type="text" id="otp" name="otp" class="otp-input" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" required autofocus>
+                </div>
+                <button type="submit" class="btn primary btn-full">Verify OTP</button>
+            </form>
+            <p class="text-link"><a href="{{ url_for('login') }}">← Back to email</a></p>
+
+        {% elif step == 'password' %}
+            <p class="card-subtitle">Enter your master password to unlock your encrypted data.</p>
+            <form id="login-password-form">
+                <input type="hidden" id="login-salt-b64" value="{{ salt }}">
+                {% if after_signup %}
+                <input type="hidden" id="after-signup" value="true">
+                {% endif %}
+                <div class="form-group">
+                    <label for="vault-password">Vault Master Password</label>
+                    <input type="password" id="vault-password" name="vault_password" placeholder="Enter master password" required autocomplete="current-password" autofocus>
+                </div>
+                <div id="pw-status" class="status"></div>
+                <button type="submit" id="pw-submit-btn" class="btn primary btn-full">Unlock &amp; View Decrypted Vault</button>
+                {% if not after_signup %}
+                <div style="margin-top: 0.75rem;">
+                    <a href="{{ url_for('vault') }}" class="btn secondary btn-full" style="text-align: center; text-decoration: none; display: block;">Continue to Vault (Encrypted Mode)</a>
+                </div>
+                {% endif %}
+            </form>
+            <p class="text-link"><a href="{{ url_for('login') }}">← Back to email</a></p>
+
+        {% else %}
+            <p class="card-subtitle">Enter your email to receive a one‑time access code.</p>
+            <form id="login-email-form" method="post" action="{{ url_for('send_login_otp') }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <div class="form-group">
+                    <label for="email">Email Address</label>
+                    <input type="email" id="email" name="email" value="{{ email }}" placeholder="you@example.com" required autofocus>
+                </div>
+                <button type="submit" class="btn primary btn-full">Send Code</button>
+            </form>
+            <p class="text-link">No account? <a href="{{ url_for('signup') }}">Create one</a></p>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+{{ super() }}
+{% if step == 'password' %}
+<script nonce="{{ csp_nonce }}" type="module">
+    import { deriveKeyFromPassword, deriveLoginVerifier } from "{{ url_for('static', filename='vault-crypto.js') }}";
+
+    function bytesToBase64(bytes) {
+        let binary = '';
+        for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+        return btoa(binary);
+    }
+
+    function getCSRFToken() {
+        const meta = document.querySelector('meta[name="csrf-token"]');
+        return meta ? meta.content : '';
+    }
+
+    document.addEventListener('DOMContentLoaded', () => {
+        const form = document.getElementById('login-password-form');
+        if (!form) return;
+
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const pwdInput = document.getElementById('vault-password');
+            const saltB64 = document.getElementById('login-salt-b64')?.value;
+            const submitBtn = document.getElementById('pw-submit-btn');
+            const statusEl = document.getElementById('pw-status');
+            const afterSignup = !!document.getElementById('after-signup');
+
+            const pwd = pwdInput ? pwdInput.value : '';
+            if (!pwd || !saltB64) return;
+
+            submitBtn.disabled = true;
+            submitBtn.textContent = 'Deriving Key…';
+            if (statusEl) {
+                statusEl.style.display = 'block';
+                statusEl.className = 'status info';
+                statusEl.textContent = 'Deriving encryption key in memory…';
+            }
+
+            try {
+                // 1. Derive key1 in memory
+                const key1 = await deriveKeyFromPassword(pwd, saltB64);
+
+                // 2. Derive verifier
+                const verifierB64 = await deriveLoginVerifier(key1);
+
+                // 3. Post verifier to server
+                const formData = new FormData();
+                formData.append('verifier', verifierB64);
+
+                const resp = await fetch('/unlock', {
+                    method: 'POST',
+                    headers: {
+                        'X-CSRFToken': getCSRFToken(),
+                        'X-Requested-With': 'XMLHttpRequest'
+                    },
+                    body: formData,
+                    credentials: 'same-origin'
+                });
+
+                const data = await resp.json().catch(() => ({}));
+
+                if (resp.ok && data.success) {
+                    sessionStorage.setItem('_transient_vault_key', bytesToBase64(key1));
+                    if (statusEl) {
+                        statusEl.className = 'status ok';
+                        statusEl.textContent = 'Password verified! Opening decrypted vault…';
+                    }
+                    setTimeout(() => { window.location.href = '/vault'; }, 300);
+                } else {
+                    if (statusEl) {
+                        statusEl.className = 'status error';
+                        if (afterSignup) {
+                            statusEl.textContent = 'Incorrect password! Please try again.';
+                            submitBtn.disabled = false;
+                            submitBtn.textContent = 'Unlock & View Decrypted Vault';
+                        } else {
+                            statusEl.textContent = 'Incorrect password! Redirecting to vault in Encrypted Mode…';
+                            setTimeout(() => { window.location.href = '/vault'; }, 1000);
+                        }
+                    } else {
+                        if (!afterSignup) {
+                            setTimeout(() => { window.location.href = '/vault'; }, 1000);
+                        }
+                    }
+                }
+            } catch (err) {
+                console.error('Password verification error:', err);
+                if (statusEl) {
+                    statusEl.className = 'status error';
+                    if (afterSignup) {
+                        statusEl.textContent = `Error: ${err.message}. Please try again.`;
+                        submitBtn.disabled = false;
+                        submitBtn.textContent = 'Unlock & View Decrypted Vault';
+                    } else {
+                        statusEl.textContent = `Error: ${err.message}. Opening vault in Encrypted Mode…`;
+                        setTimeout(() => { window.location.href = '/vault'; }, 1000);
+                    }
+                } else {
+                    if (!afterSignup) {
+                        setTimeout(() => { window.location.href = '/vault'; }, 1000);
+                    }
+                }
+            }
+        });
+    });
+</script>
+{% endif %}
+{% endblock %}

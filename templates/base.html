@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}ZK Vault{% endblock %}</title>
+    <meta name="description" content="Zero-knowledge encrypted vault — your data never leaves your device unencrypted.">
+    <meta name="csrf-token" content="{{ csrf_token() }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    {% block extra_head %}{% endblock %}
+</head>
+<body>
+
+    <div class="bg-grid"></div>
+
+    {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+            <div class="flash-messages">
+                {% for category, message in messages %}
+                    <div class="flash {{ category }}">{{ message }}</div>
+                {% endfor %}
+            </div>
+        {% endif %}
+    {% endwith %}
+
+    <main>
+        {% block content %}{% endblock %}
+    </main>
+
+    {% block scripts %}
+        <script nonce="{{ csp_nonce }}" type="importmap">
+        {
+            "imports": {
+                "hash-wasm": "{{ url_for('static', filename='vendor/hash-wasm.js') }}"
+            }
+        }
+        </script>
+        <script nonce="{{ csp_nonce }}" type="module" src="{{ url_for('static', filename='index.js') }}"></script>
+    {% endblock %}
+</body>
+</html>

@@ -1,0 +1,175 @@
+{% extends "base.html" %}
+
+{% block title %}Sign Up — ZK Vault{% endblock %}
+
+{% block content %}
+<style nonce="{{ csp_nonce }}">
+    .wizard-step {
+        display: none !important;
+    }
+    .wizard-step.active {
+        display: block !important;
+    }
+</style>
+<div class="auth-layout">
+    <div class="auth-card">
+        <div class="card-icon">◇</div>
+        <h2>Create Account</h2>
+        <p class="card-subtitle">Your data is encrypted locally — we never see your password or your files.</p>
+
+        <form id="signup-form" method="post" action="{{ url_for('request_signup_otp') }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <div class="form-group">
+                <label for="email">Email Address</label>
+                <input type="email" id="email" name="email" placeholder="you@example.com" required autofocus>
+            </div>
+            <div class="form-group">
+                <label for="name">Full Name</label>
+                <input type="text" id="name" name="name" placeholder="Jane Doe" required>
+            </div>
+            
+            <div class="form-group">
+                <label>Terms &amp; Conditions</label>
+                <div id="terms-wizard" style="border: 1px solid var(--border); border-radius: var(--radius); padding: 0.85rem; font-size: 0.78rem; line-height: 1.5; color: var(--text-secondary); background: var(--bg-input); position: relative; overflow: hidden; margin-bottom: 1rem;">
+                    
+                    <!-- Wizard Header -->
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.75rem; border-bottom: 1px solid var(--border-light); padding-bottom: 0.4rem;">
+                        <span style="font-weight: bold; color: var(--white); text-transform: uppercase; font-size: 0.7rem; letter-spacing: 0.05em;">Security &amp; Service Rules</span>
+                        <span id="wizard-step-indicator" style="font-family: var(--font-mono); font-size: 0.7rem; color: var(--text-muted);">Step 1 of 5</span>
+                    </div>
+
+                    <!-- Steps Content -->
+                    <div id="wizard-steps-container">
+                        <!-- Step 1 -->
+                        <div class="wizard-step active" data-step="1">
+                            <p style="margin-bottom: 0.4rem; font-weight: bold; color: var(--white); font-size: 0.82rem;">1. Zero-Knowledge Cryptography</p>
+                            <p style="color: var(--text-primary); margin-bottom: 0.4rem;">All encryption keys and master passwords are derived locally in your browser. The server never stores, receives, or has access to your passwords or decrypted files.</p>
+                        </div>
+                        
+                        <!-- Step 2 -->
+                        <div class="wizard-step" data-step="2">
+                            <p style="margin-bottom: 0.4rem; font-weight: bold; color: #ff7675; font-size: 0.82rem;">⚠️ 2. Irrecoverable Credentials (CRITICAL)</p>
+                            <p style="color: var(--text-primary); margin-bottom: 0.4rem;">Since this service is zero-knowledge, <strong>there is no password reset mechanism</strong>. If you forget your master password, all vault data is lost permanently and cannot be recovered by support or administrators.</p>
+                        </div>
+                        
+                        <!-- Step 3 -->
+                        <div class="wizard-step" data-step="3">
+                            <p style="margin-bottom: 0.4rem; font-weight: bold; color: var(--white); font-size: 0.82rem;">3. Data &amp; Storage Limits</p>
+                            <p style="color: var(--text-primary); margin-bottom: 0.4rem;">Default account limits allow up to 1,000 records and 100 MB of total vault storage. Storage usage is calculated based on raw client-side ciphertext length.</p>
+                        </div>
+                        
+                        <!-- Step 4 -->
+                        <div class="wizard-step" data-step="4">
+                            <p style="margin-bottom: 0.4rem; font-weight: bold; color: var(--white); font-size: 0.82rem;">4. Acceptable Content Policy</p>
+                            <p style="color: var(--text-primary); margin-bottom: 0.4rem;">You agree not to store malicious software, illegal material, or use the storage service for unauthorized activities.</p>
+                        </div>
+                        
+                        <!-- Step 5 -->
+                        <div class="wizard-step" data-step="5">
+                            <p style="margin-bottom: 0.4rem; font-weight: bold; color: var(--white); font-size: 0.82rem;">5. Service Availability Agreement</p>
+                            <p style="color: var(--text-primary); margin-bottom: 0.4rem;">The vault is provided as-is without warranties of uptime. Continued use of the platform constitutes agreement to all these rules.</p>
+                        </div>
+                    </div>
+
+                    <!-- Wizard Actions -->
+                    <div style="display: flex; justify-content: flex-end; align-items: center; margin-top: 0.85rem; border-top: 1px solid var(--border-light); padding-top: 0.6rem;">
+                        <button type="button" id="wizard-next-btn" class="btn primary" style="padding: 0.35rem 0.75rem; font-size: 0.72rem; min-width: 90px; width: auto;" disabled>
+                            Next (3s)
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="form-group" style="display: flex; align-items: center; gap: 0.5rem; margin-top: 1rem; margin-bottom: 1rem;">
+                <input type="checkbox" id="agree-terms" disabled style="width: auto; cursor: pointer;">
+                <label for="agree-terms" style="margin-bottom: 0; font-size: 0.78rem; text-transform: none; font-family: var(--font-body); cursor: pointer; color: var(--text-muted);">
+                    I have read and agree to the <a href="{{ url_for('terms') }}" target="_blank" style="color: var(--white); border-bottom: 1px solid var(--border-light);">Terms &amp; Conditions</a>
+                </label>
+            </div>
+
+            <button type="submit" class="btn primary btn-full">Send Verification Code</button>
+        </form>
+        <p class="text-link">Already have an account? <a href="{{ url_for('login') }}">Log in</a></p>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+{{ super() }}
+<script nonce="{{ csp_nonce }}">
+    document.addEventListener('DOMContentLoaded', () => {
+        const checkbox = document.getElementById('agree-terms');
+        const submitBtn = document.querySelector('#signup-form button[type="submit"]');
+        const nextBtn = document.getElementById('wizard-next-btn');
+        const indicator = document.getElementById('wizard-step-indicator');
+
+        let currentStep = 1;
+        let countdownInterval = null;
+
+        // Force disable submit on startup
+        if (submitBtn) submitBtn.disabled = true;
+
+        function startTimer(step) {
+            clearInterval(countdownInterval);
+            nextBtn.disabled = true;
+            let secondsLeft = 3;
+            
+            if (step === 5) {
+                nextBtn.textContent = `Finish (${secondsLeft}s)`;
+            } else {
+                nextBtn.textContent = `Next (${secondsLeft}s)`;
+            }
+
+            countdownInterval = setInterval(() => {
+                secondsLeft--;
+                if (secondsLeft <= 0) {
+                    clearInterval(countdownInterval);
+                    nextBtn.disabled = false;
+                    if (step === 5) {
+                        nextBtn.textContent = 'Finish & Accept';
+                    } else {
+                        nextBtn.textContent = 'Next Step';
+                    }
+                } else {
+                    if (step === 5) {
+                        nextBtn.textContent = `Finish (${secondsLeft}s)`;
+                    } else {
+                        nextBtn.textContent = `Next (${secondsLeft}s)`;
+                    }
+                }
+            }, 1000);
+        }
+
+        // Start timer for Step 1
+        startTimer(1);
+
+        nextBtn.addEventListener('click', () => {
+            if (currentStep < 5) {
+                // Go to next step
+                document.querySelector(`.wizard-step[data-step="${currentStep}"]`).classList.remove('active');
+                currentStep++;
+                document.querySelector(`.wizard-step[data-step="${currentStep}"]`).classList.add('active');
+                indicator.textContent = `Step ${currentStep} of 5`;
+                startTimer(currentStep);
+            } else if (currentStep === 5) {
+                // Finished wizard — enable checkbox for user manual agreement
+                nextBtn.style.display = 'none';
+                indicator.textContent = 'Finished! Please check the box below ✅';
+                indicator.style.color = '#2ecc71';
+                checkbox.disabled = false;
+                document.querySelector('label[for="agree-terms"]').style.color = 'var(--text-primary)';
+                if (submitBtn) submitBtn.disabled = !checkbox.checked;
+            }
+        });
+
+        // Toggle submit button based on checkbox
+        if (checkbox) {
+            checkbox.addEventListener('change', () => {
+                if (submitBtn) {
+                    submitBtn.disabled = !checkbox.checked;
+                }
+            });
+        }
+    });
+</script>
+{% endblock %}

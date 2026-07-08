@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+
+{% block title %}Terminate Sessions — ZK Vault{% endblock %}
+
+{% block content %}
+<div class="auth-layout">
+    <div class="auth-card">
+        <div class="card-icon warning-icon">⚠</div>
+        <h2>Terminate All Sessions</h2>
+        <div class="confirm-warning">
+            This will log you out of all devices and lock your account for 2 hours.
+        </div>
+        <p class="card-subtitle">Account: <strong>{{ email }}</strong></p>
+
+        <form method="post" action="{{ url_for('terminate_sessions', token=token) }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <div class="btn-group">
+                <button type="submit" class="btn danger btn-full">Terminate Sessions</button>
+                <a href="{{ url_for('login') }}" class="btn secondary btn-full">Cancel</a>
+            </div>
+        </form>
+    </div>
+</div>
+{% endblock %}

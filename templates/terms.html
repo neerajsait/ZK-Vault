@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+
+{% block title %}Terms & Conditions — ZK Vault{% endblock %}
+
+{% block content %}
+<div class="auth-layout" style="max-width: 600px; margin: 0 auto; padding: 2rem 1rem;">
+    <div class="auth-card" style="max-width: 100%;">
+        <div class="card-icon">◇</div>
+        <h2>Terms &amp; Conditions</h2>
+        <p class="card-subtitle">Please read the rules and regulations of ZK Vault carefully.</p>
+        
+        <div class="divider"></div>
+
+        <div style="font-size: 0.85rem; line-height: 1.6; color: var(--text-primary); max-height: 400px; overflow-y: auto; padding-right: 0.5rem; margin-bottom: 1.5rem;">
+            <h3 style="font-family: var(--font-mono); font-size: 0.8rem; margin-top: 1rem; color: var(--white); text-transform: uppercase;">1. Zero-Knowledge Cryptography</h3>
+            <p style="margin-bottom: 1rem; color: var(--text-secondary);">
+                ZK Vault is built as a zero-knowledge service. This means your master password, keys, and file contents are encrypted and decrypted directly in your web browser. The server never receives or stores your unencrypted data or master password.
+            </p>
+
+            <h3 style="font-family: var(--font-mono); font-size: 0.8rem; margin-top: 1rem; color: var(--white); text-transform: uppercase;">2. User Responsibility &amp; Data Recovery</h3>
+            <p style="margin-bottom: 1rem; color: var(--text-secondary);">
+                Because of the zero-knowledge nature of the vault, we cannot reset your master password or recover your vault if you forget your credentials. You are solely responsible for remembering your master password and backing up any critical records.
+            </p>
+
+            <h3 style="font-family: var(--font-mono); font-size: 0.8rem; margin-top: 1rem; color: var(--white); text-transform: uppercase;">3. Acceptable Use Policy</h3>
+            <p style="margin-bottom: 1rem; color: var(--text-secondary);">
+                You agree not to use ZK Vault to store illegal content, distribute malware, or perform actions that violate applicable local, national, or international laws. We reserve the right to delete accounts that violate these terms.
+            </p>
+
+            <h3 style="font-family: var(--font-mono); font-size: 0.8rem; margin-top: 1rem; color: var(--white); text-transform: uppercase;">4. Quotas and Limits</h3>
+            <p style="margin-bottom: 1rem; color: var(--text-secondary);">
+                Your account is subject to maximum storage limits (100 MB default) and record counts (1000 records default). Exceeding these quotas will result in write restrictions.
+            </p>
+
+            <h3 style="font-family: var(--font-mono); font-size: 0.8rem; margin-top: 1rem; color: var(--white); text-transform: uppercase;">5. Modifications to Terms</h3>
+            <p style="margin-bottom: 1rem; color: var(--text-secondary);">
+                We reserve the right to update these terms at any time. Continued use of the platform constitutes acceptance of the updated terms.
+            </p>
+        </div>
+
+        <div class="divider"></div>
+        
+        <p class="text-center">
+            <a href="{{ url_for('signup') }}" class="btn primary btn-full">Back to Sign Up</a>
+        </p>
+    </div>
+</div>
+{% endblock %}

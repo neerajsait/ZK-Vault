@@ -1,0 +1,521 @@
+{% extends "base.html" %}
+
+{% block title %}Vault — ZK Vault{% endblock %}
+
+{% block extra_head %}
+<style nonce="{{ csp_nonce }}">
+    /* SPA View Container & Tabs */
+    .spa-container {
+        max-width: var(--container-max, 960px);
+        margin: 0 auto;
+        padding: 1.5rem 1rem;
+    }
+    .vault-nav {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        background: var(--bg-card);
+        backdrop-filter: blur(20px);
+        -webkit-backdrop-filter: blur(20px);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-lg);
+        padding: 0.75rem 1.25rem;
+        margin-bottom: 1.5rem;
+        gap: 1rem;
+        flex-wrap: wrap;
+    }
+    .vault-brand {
+        display: flex;
+        align-items: center;
+        gap: 0.6rem;
+        font-family: var(--font-mono);
+        font-weight: 700;
+        font-size: 1.1rem;
+        color: var(--white);
+    }
+    .vault-tabs {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        flex-wrap: wrap;
+    }
+    .tab-btn {
+        background: transparent;
+        border: 1px solid transparent;
+        color: var(--text-secondary);
+        padding: 0.45rem 0.85rem;
+        border-radius: var(--radius);
+        font-family: var(--font-mono);
+        font-size: 0.78rem;
+        cursor: pointer;
+        transition: all var(--speed);
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4rem;
+    }
+    .tab-btn:hover {
+        color: var(--white);
+        background: var(--bg-hover);
+        border-color: var(--border-light);
+    }
+    .tab-btn.active {
+        color: var(--white);
+        background: var(--bg-card-solid);
+        border-color: var(--border-focus);
+        box-shadow: 0 0 10px rgba(255,255,255,0.05);
+    }
+    .tab-btn.disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+    }
+    .vault-user-info {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+    }
+    .lock-badge {
+        font-family: var(--font-mono);
+        font-size: 0.72rem;
+        padding: 0.25rem 0.6rem;
+        border-radius: var(--radius);
+        border: 1px solid;
+    }
+    .lock-badge.locked {
+        background: var(--accent-glow);
+        border-color: rgba(255, 0, 51, 0.3);
+        color: var(--accent);
+    }
+    .lock-badge.unlocked {
+        background: var(--green-bg);
+        border-color: rgba(0, 255, 136, 0.3);
+        color: var(--green);
+    }
+
+    /* SPA Section visibility */
+    .spa-section {
+        display: none;
+    }
+    .spa-section.active {
+        display: block;
+        animation: fadeIn 0.2s ease-in-out;
+    }
+    @keyframes fadeIn {
+        from { opacity: 0; transform: translateY(4px); }
+        to { opacity: 1; transform: translateY(0); }
+    }
+
+    /* Unlock Card inside SPA */
+    .spa-unlock-card {
+        max-width: 440px;
+        margin: 2rem auto;
+    }
+
+    /* Search & Tools Bar */
+    .toolbar {
+        display: flex;
+        gap: 0.75rem;
+        margin-bottom: 1.25rem;
+        align-items: center;
+        flex-wrap: wrap;
+    }
+    .search-input {
+        flex: 1;
+        min-width: 200px;
+        padding: 0.65rem 0.9rem;
+        background: var(--bg-input);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        color: var(--text-primary);
+        font-size: 0.85rem;
+        outline: none;
+    }
+    .search-input:focus { border-color: var(--border-focus); }
+
+    /* Quota bar */
+    .quota-card {
+        background: var(--bg-card);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 0.75rem 1rem;
+        margin-bottom: 1.25rem;
+        font-size: 0.78rem;
+        font-family: var(--font-mono);
+        color: var(--text-secondary);
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+    }
+    .quota-progress {
+        width: 100%;
+        height: 4px;
+        background: var(--border);
+        border-radius: 2px;
+        overflow: hidden;
+        margin-top: 0.4rem;
+    }
+    .quota-bar {
+        height: 100%;
+        background: var(--green);
+        width: 0%;
+        transition: width 0.3s ease;
+    }
+
+    /* Secret Vault banner */
+    .secret-banner {
+        background: rgba(255, 0, 51, 0.08);
+        border: 1px solid rgba(255, 0, 51, 0.25);
+        border-radius: var(--radius);
+        padding: 1rem;
+        margin-bottom: 1.25rem;
+        font-size: 0.82rem;
+        color: var(--text-primary);
+    }
+
+    /* Modal tweaks */
+    .modal {
+        position: fixed;
+        inset: 0;
+        z-index: 1000;
+        background: rgba(0, 0, 0, 0.8);
+        backdrop-filter: blur(8px);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 1rem;
+    }
+    .modal.hidden { display: none !important; }
+    .modal-content {
+        background: var(--bg-card-solid);
+        border: 1px solid var(--border-light);
+        border-radius: var(--radius-lg);
+        width: 100%;
+        max-width: 540px;
+        padding: 1.75rem;
+        position: relative;
+        max-height: 90vh;
+        overflow-y: auto;
+    }
+    .modal-content .close {
+        position: absolute;
+        top: 1rem;
+        right: 1.25rem;
+        background: transparent;
+        border: none;
+        color: var(--text-muted);
+        font-size: 1.5rem;
+        cursor: pointer;
+    }
+    .modal-content .close:hover { color: var(--white); }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="spa-container">
+    <!-- SPA Top Navigation Bar -->
+    <header class="vault-nav">
+        <div class="vault-brand">
+            <span style="color: var(--accent);">◆</span> ZK VAULT
+        </div>
+
+        <nav class="vault-tabs" id="vault-tabs">
+            <button class="tab-btn active" data-section="unlock" id="tab-unlock-btn">
+                <span>◉</span> Unlock
+            </button>
+            <button class="tab-btn disabled" data-section="records" id="tab-records-btn">
+                <span>◆</span> Vault
+            </button>
+            <button class="tab-btn disabled" data-section="secret" id="tab-secret-btn">
+                <span>🔒</span> Secret Vault
+            </button>
+            <button class="tab-btn disabled" data-section="change-password" id="tab-change-pw-btn">
+                <span>⟳</span> Change Password
+            </button>
+            <button class="tab-btn" data-section="settings" id="tab-settings-btn">
+                <span>⚙</span> Settings
+            </button>
+        </nav>
+
+        <div class="vault-user-info">
+            <span id="lock-status-badge" class="lock-badge locked">● Locked</span>
+            <a href="{{ url_for('logout') }}" id="logout-btn" class="btn danger" style="padding: 0.35rem 0.7rem; font-size: 0.72rem;">Logout</a>
+        </div>
+    </header>
+
+    <!-- Hidden configuration meta passed safely from server -->
+    <input type="hidden" id="saltB64" value="{{ salt }}" />
+    <input type="hidden" id="secretSaltB64" value="{{ secret_salt or '' }}" />
+
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <!-- SECTION 1: IN-PAGE UNLOCK VAULT VIEW -->
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <section id="sec-unlock" class="spa-section active">
+        <div class="auth-card spa-unlock-card">
+            <div class="card-icon">◉</div>
+            <h2>Unlock Vault</h2>
+            <p class="card-subtitle">Enter your master password. Your encryption key is derived locally in memory and is never saved to disk or browser storage.</p>
+
+            <form id="spa-unlock-form" action="javascript:void(0);">
+                <div class="form-group">
+                    <label for="vault-password-input">Vault Password</label>
+                    <input type="password" id="vault-password-input" placeholder="Enter vault password" required autofocus autocomplete="current-password" />
+                </div>
+
+                <div id="unlock-status" class="status"></div>
+
+                <button type="submit" id="unlock-submit-btn" class="btn primary btn-full">Unlock Vault</button>
+            </form>
+        </div>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <!-- SECTION 2: NORMAL RECORDS DASHBOARD -->
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <section id="sec-records" class="spa-section">
+        <div class="quota-card" id="quota-info-card">
+            <div>
+                <span>STORAGE USAGE: </span>
+                <strong id="quota-usage-text" style="color: var(--white);">0 KB</strong> / <span id="max-storage-text">100 MB</span>
+            </div>
+            <div>
+                <span>RECORDS: </span>
+                <strong id="quota-count-text" style="color: var(--white);">0</strong> / <span id="max-records-text">1000</span>
+            </div>
+            <div class="quota-progress">
+                <div id="quota-bar-fill" class="quota-bar"></div>
+            </div>
+        </div>
+
+        <div class="toolbar">
+            <input type="text" id="search-records-input" class="search-input" placeholder="Search records by title..." />
+            <button id="create-record-btn" class="btn primary">+ New Record</button>
+        </div>
+
+        <div id="record-list" class="record-list">
+            <div class="loading">Loading records…</div>
+        </div>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <!-- SECTION 3: SECRET VAULT -->
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <section id="sec-secret" class="spa-section">
+        <div class="secret-banner">
+            <strong>🔒 Secret Vault (Double-Encrypted Area)</strong>
+            <p style="margin-top: 0.3rem; color: var(--text-secondary);">
+                Records in this section are protected with a second layer of encryption derived from your minimum 12-character Secret Code.
+            </p>
+        </div>
+
+        {% if not has_secret %}
+        <!-- Sub-view A: Secret Setup Prompt (if secret vault is NOT set up) -->
+        <div id="secret-setup-container" class="auth-card max-480" style="margin: 1.5rem auto;">
+            <div class="card-icon" style="color: var(--accent);">🛡️</div>
+            <h2>Create Secret Vault</h2>
+            <p class="card-subtitle">Set up a 12+ character Secret Code (Base32: A-Z, 2-7) to double-encrypt ultra-sensitive records.</p>
+
+            <form id="secret-setup-form">
+                <div class="form-group">
+                    <label for="setup-secret-code-input">Secret Code</label>
+                    <input type="password" id="setup-secret-code-input" placeholder="Enter secret code (min 12 chars, Base32)" required pattern="[a-zA-Z2-7]{12,}" />
+                </div>
+                <div class="form-group">
+                    <label for="setup-secret-code-confirm">Confirm Secret Code</label>
+                    <input type="password" id="setup-secret-code-confirm" placeholder="Re-enter secret code" required pattern="[a-zA-Z2-7]{12,}" />
+                </div>
+                <div id="secret-setup-status" class="status"></div>
+                <button type="submit" id="secret-setup-submit-btn" class="btn primary btn-full">Create &amp; Unlock Secret Vault</button>
+            </form>
+        </div>
+        {% else %}
+        <!-- Sub-view A: Secret Unlock Prompt (if not derived in memory) -->
+        <div id="secret-lock-container" class="auth-card max-480" style="margin: 1.5rem auto;">
+            <div class="card-icon" style="color: var(--accent);">🔐</div>
+            <h2>Unlock Secret Vault</h2>
+            <p class="card-subtitle">Enter your secret code (at least 12 characters) to derive your secret vault key.</p>
+
+            <form id="secret-unlock-form">
+                <div class="form-group">
+                    <label for="secret-code-input">Secret Code</label>
+                    <input type="password" id="secret-code-input" placeholder="Enter secret code (min 12 chars)" required pattern="[a-zA-Z2-7]{12,}" />
+                </div>
+                <div id="secret-status" class="status"></div>
+                <button type="submit" id="secret-unlock-submit-btn" class="btn primary btn-full">Unlock Secret Vault</button>
+            </form>
+        </div>
+        {% endif %}
+
+        <!-- Sub-view B: Secret Records List (shown once unlocked in memory) -->
+        <div id="secret-records-container" class="hidden">
+            <div class="toolbar">
+                <input type="text" id="search-secret-records-input" class="search-input" placeholder="Search secret records..." />
+                <button id="create-secret-record-btn" class="btn primary">+ New Secret Record</button>
+            </div>
+
+            <div id="secret-record-list" class="record-list">
+                <div class="loading">Loading secret records…</div>
+            </div>
+        </div>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <!-- SECTION 4: CHANGE PASSWORD -->
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <section id="sec-change-password" class="spa-section">
+        <div class="auth-card max-480" style="margin: 1rem auto;">
+            <div class="card-icon">⟳</div>
+            <h2>Change Vault Password</h2>
+            <p class="card-subtitle">Re-encrypt all your vault records in your browser with a new master password.</p>
+
+            <form id="change-password-form">
+                <div class="form-group">
+                    <label for="cp-current-pw">Current Master Password</label>
+                    <input type="password" id="cp-current-pw" required autocomplete="current-password" />
+                </div>
+
+                <div class="form-group">
+                    <label for="cp-new-pw">New Master Password</label>
+                    <input type="password" id="cp-new-pw" required minlength="12" autocomplete="new-password" placeholder="Minimum 12 characters" />
+                </div>
+
+                <div class="form-group">
+                    <label for="cp-confirm-pw">Confirm New Password</label>
+                    <input type="password" id="cp-confirm-pw" required placeholder="Re-enter new password" />
+                </div>
+
+                {% if has_secret %}
+                <div class="form-group" id="cp-secret-code-group">
+                    <label for="cp-secret-code">Secret Code (min 12 chars)</label>
+                    <input type="password" id="cp-secret-code" pattern="[a-zA-Z2-7]{12,}" placeholder="Enter secret code" required />
+                    <div style="font-size: 0.72rem; color: var(--text-muted); margin-top: 0.3rem;">Required to re-key your Secret Vault records.</div>
+                </div>
+                {% endif %}
+
+                <div id="cp-status" class="status"></div>
+
+                <div style="margin-top: 1rem;">
+                    <button type="submit" id="cp-submit-btn" class="btn primary btn-full">Re-Encrypt &amp; Change Password</button>
+                </div>
+            </form>
+        </div>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <!-- SECTION 5: ACCOUNT SETTINGS -->
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <section id="sec-settings" class="spa-section">
+        <div class="auth-card max-480" style="margin: 1rem auto;">
+            <div class="card-icon">⚙</div>
+            <h2>Account Settings</h2>
+            <p class="card-subtitle">Manage your account credentials and security preferences.</p>
+
+            <div style="background: var(--bg-input); border: 1px solid var(--border); border-radius: var(--radius); padding: 1rem; margin-bottom: 1.5rem; font-size: 0.82rem;">
+                <div style="margin-bottom: 0.5rem; display: flex; justify-content: space-between;">
+                    <span style="color: var(--text-secondary);">Account Name:</span>
+                    <strong style="color: var(--white);">{{ user.name }}</strong>
+                </div>
+                <div style="margin-bottom: 0.5rem; display: flex; justify-content: space-between;">
+                    <span style="color: var(--text-secondary);">Encrypted Email:</span>
+                    <strong style="color: var(--white);">{{ user_email }}</strong>
+                </div>
+                <div style="display: flex; justify-content: space-between;">
+                    <span style="color: var(--text-secondary);">Security Model:</span>
+                    <span style="color: var(--green); font-family: var(--font-mono);">Zero-Knowledge (In-Memory Key)</span>
+                </div>
+            </div>
+
+            <div style="border-top: 1px solid var(--border); padding-top: 1.25rem; margin-top: 1.25rem;">
+                <h4 style="color: var(--accent); font-size: 0.9rem; font-family: var(--font-mono); margin-bottom: 0.4rem;">DANGER ZONE</h4>
+                <p style="font-size: 0.78rem; color: var(--text-secondary); margin-bottom: 1rem;">
+                    Permanently delete your account and all encrypted vault records. This action cannot be undone.
+                </p>
+                <button type="button" id="open-delete-account-modal-btn" class="btn danger btn-full">Delete Account</button>
+            </div>
+        </div>
+    </section>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- MODAL: CREATE / EDIT RECORD -->
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<div id="record-modal" class="modal hidden">
+    <div class="modal-content">
+        <button type="button" class="close" id="record-modal-close-x">&times;</button>
+        <h3 id="modal-title" style="font-family: var(--font-mono); margin-bottom: 1rem;">New Record</h3>
+        <form id="record-form">
+            <input type="hidden" id="record-id" value="">
+            <input type="hidden" id="record-is-secret" value="false">
+            <div class="form-group">
+                <label for="record-title">Title</label>
+                <input type="text" id="record-title" placeholder="Record title" required>
+            </div>
+            <div class="form-group">
+                <label for="record-notes">Notes</label>
+                <textarea id="record-notes" rows="4" placeholder="Encrypted notes…"></textarea>
+            </div>
+            <div class="form-group">
+                <label for="record-files">Attach Files</label>
+                <input type="file" id="record-files" multiple>
+                <div id="file-list" class="file-list"></div>
+            </div>
+            <div id="modal-status" class="status"></div>
+            <button type="submit" id="record-save-btn" class="btn primary btn-full" style="margin-top: 1rem;">Save Record</button>
+        </form>
+    </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- MODAL: VIEW RECORD -->
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<div id="view-record-modal" class="modal hidden">
+    <div class="modal-content">
+        <button type="button" class="close" id="view-modal-close-x">&times;</button>
+        <h3 id="view-modal-title" style="font-family: var(--font-mono); margin-bottom: 1rem;">Record Details</h3>
+        <div class="view-modal-body">
+            <div class="form-group">
+                <label>Title</label>
+                <div id="view-record-title" class="view-title-text" style="font-weight: bold; color: var(--white);"></div>
+            </div>
+            <div class="form-group">
+                <label>Notes</label>
+                <div id="view-record-notes" class="view-notes-text" style="white-space: pre-wrap; background: var(--bg-input); padding: 0.75rem; border: 1px solid var(--border); border-radius: var(--radius); font-size: 0.85rem;"></div>
+            </div>
+            <div id="view-files-container" class="form-group hidden">
+                <label>Attached Files</label>
+                <div id="view-files-list" class="view-files-list"></div>
+            </div>
+        </div>
+        <div style="margin-top: 1.5rem; display: flex; justify-content: flex-end;">
+            <button type="button" id="view-modal-close-btn" class="btn secondary">Close</button>
+        </div>
+    </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- MODAL: RE-VERIFY PASSWORD TO DELETE ACCOUNT -->
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<div id="delete-account-modal" class="modal hidden">
+    <div class="modal-content">
+        <button type="button" class="close" id="delete-account-modal-close-x">&times;</button>
+        <h3 style="font-family: var(--font-mono); color: var(--accent); margin-bottom: 0.5rem;">Confirm Account Deletion</h3>
+        <p style="font-size: 0.82rem; color: var(--text-secondary); margin-bottom: 1rem;">
+            Please enter your master password to verify authorization. All your vault data will be permanently erased.
+        </p>
+
+        <form id="delete-account-form">
+            <div class="form-group">
+                <label for="delete-account-password">Vault Master Password</label>
+                <input type="password" id="delete-account-password" required placeholder="Enter master password" />
+            </div>
+
+            <div id="delete-account-status" class="status"></div>
+
+            <div style="display: flex; gap: 0.75rem; margin-top: 1.25rem;">
+                <button type="button" id="delete-account-cancel-btn" class="btn secondary" style="flex: 1;">Cancel</button>
+                <button type="submit" id="delete-account-confirm-btn" class="btn danger" style="flex: 1;">Delete Permanently</button>
+            </div>
+        </form>
+    </div>
+</div>
+{% endblock %}

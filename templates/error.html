@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+
+{% block title %}Error {{ code }} — ZK Vault{% endblock %}
+
+{% block content %}
+<div class="auth-layout">
+    <div class="error-card auth-card">
+        <div class="error-code">{{ code }}</div>
+        <h2>{{ title }}</h2>
+        <p>{{ message }}</p>
+        <a href="{{ url_for('login') }}" class="btn primary">Return Home</a>
+    </div>
+</div>
+{% endblock %}
