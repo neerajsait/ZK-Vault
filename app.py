@@ -69,13 +69,14 @@ app.config['SESSION_SERIALIZATION_FORMAT'] = 'json'
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=8)
 app.config['TEMPLATES_AUTO_RELOAD'] = app.debug
 
-# Max upload: 5 files x 10 MB raw = 50 MB, but ciphertext is sent as
-# base64-encoded JSON which inflates size by ~33% -> ~66.7 MB, plus JSON
-# envelope overhead. 75 MB gives safe headroom without being too generous.
-app.config['MAX_CONTENT_LENGTH'] = 75 * 1024 * 1024
-
 app.config['MAX_RECORDS_PER_USER'] = int(os.getenv('MAX_RECORDS_PER_USER', 1000))
 app.config['MAX_STORAGE_PER_USER_MB'] = int(os.getenv('MAX_STORAGE_PER_USER_MB', 100))
+
+# The password-change endpoint requires submitting all user records at once.
+# To prevent HTTP 413 Payload Too Large when a user is near their storage quota,
+# MAX_CONTENT_LENGTH must be larger than MAX_STORAGE_PER_USER_MB with some headroom
+# (e.g., to accommodate JSON structure overhead and extra fields).
+app.config['MAX_CONTENT_LENGTH'] = (app.config['MAX_STORAGE_PER_USER_MB'] + 50) * 1024 * 1024
 
 app.config['SESSION_TYPE'] = 'redis'
 app.config['SESSION_REDIS'] = redis.from_url(
@@ -1350,19 +1351,31 @@ def request_logout_link():
 
 @app.route('/terminate_sessions/<token>', methods=['GET', 'POST'])
 def terminate_sessions(token):
-    user_id = consume_logout_token(token)
-    if not user_id:
-        flash('Invalid or expired session termination link.', 'danger')
+    if request.method == 'POST':
+        user_id = consume_logout_token(token)
+        if not user_id:
+            flash('Invalid or expired session termination link.', 'danger')
+            return redirect(url_for('login'))
+        user = db_session.query(User).filter_by(id=user_id).first()
+        if user:
+            clear_user_sessions(user_id)
+            user.logout_cooldown_until = datetime.now() + timedelta(minutes=15)
+            db_session.commit()
+            send_session_terminated_alert(user, 15)
+        session.clear()
+        flash('All active sessions have been terminated.', 'info')
         return redirect(url_for('login'))
-    user = db_session.query(User).filter_by(id=user_id).first()
-    if user:
-        clear_user_sessions(user_id)
-        user.logout_cooldown_until = datetime.now() + timedelta(minutes=15)
-        db_session.commit()
-        send_session_terminated_alert(user, 15)
-    session.clear()
-    flash('All active sessions have been terminated.', 'info')
-    return redirect(url_for('login'))
+    else:
+        user_id = get_user_id_from_logout_token(token)
+        if not user_id:
+            flash('Invalid or expired session termination link.', 'danger')
+            return redirect(url_for('login'))
+        user = db_session.query(User).filter_by(id=user_id).first()
+        if not user:
+            flash('User not found.', 'danger')
+            return redirect(url_for('login'))
+        email = safe_decrypt_email(user.encrypted_email)
+        return render_template('confirm_terminate.html', token=token, email=email)
 
 
 
@@ -1641,6 +1654,7 @@ def api_delete_record(record_id):
 # the ciphertext (full ZK choice). The JS fetch handler should trigger a
 # download using the decrypted filename after decryption.
 @app.route('/api/records/<record_id>/file/<int:file_index>', methods=['GET'])
+@limiter.limit("200 per hour")
 def api_download_file(record_id, file_index):
     user, err = _require_vault_unlocked()
     if err:
@@ -2014,6 +2028,8 @@ def api_user_quota():
 def _require_secret_unlocked():
     if 'user_id' not in session:
         return None, (jsonify(error='Please log in.'), 401)
+    if not session.get('secret_unlocked'):
+        return None, (jsonify(error='Secret vault locked'), 403)
     user = db_session.query(User).filter_by(id=session['user_id']).first()
     if not user:
         return None, (jsonify(error='User not found'), 403)
