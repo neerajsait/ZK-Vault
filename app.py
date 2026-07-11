@@ -90,6 +90,12 @@ app.config['SESSION_PERMANENT'] = True
 app.config['SESSION_COOKIE_HTTPONLY'] = True
 app.config['SESSION_COOKIE_SECURE'] = True if not app.debug else False
 app.config['SESSION_COOKIE_SAMESITE'] = 'Strict'
+_force_https = os.getenv('FORCE_HTTPS', 'false').lower() in ('true', '1', 'yes')
+if _force_https:
+    app.config['SESSION_COOKIE_NAME'] = '__Host-zkv_sess'
+else:
+    app.config['SESSION_COOKIE_NAME'] = 'zkv_sess'
+app.config['SESSION_COOKIE_PATH'] = '/'
 
 Session(app)
 
@@ -123,12 +129,40 @@ Talisman(
 
 @app.after_request
 def add_csp_headers(response):
+    response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    response.headers['Pragma'] = 'no-cache'
+    response.headers['Expires'] = '0'
+    response.headers['Server'] = 'SecurePersonalVault'
+
+    # If redirect or JSON, apply minimal strict CSP.
+    # We must explicitly define form-action, base-uri, object-src, and frame-ancestors
+    # to avoid ZAP's 'Failure to Define Directive with No Fallback' warning.
+    if (300 <= response.status_code < 400) or (response.mimetype == 'application/json'):
+        response.headers['Content-Security-Policy'] = (
+            "default-src 'self'; "
+            "frame-ancestors 'none'; "
+            "form-action 'self'; "
+            "base-uri 'self'; "
+            "object-src 'none'"
+        )
+        return response
+
     nonce = g.get('csp_nonce', '')
+
+    # Only include 'wasm-unsafe-eval' on routes that actually derive keys via Argon2 WASM
+    needs_wasm = False
+    if request.path in ('/set_password', '/vault', '/change_password'):
+        needs_wasm = True
+    elif request.path == '/login' and request.args.get('step') == 'password':
+        needs_wasm = True
+
+    script_sources = ["'self'", f"'nonce-{nonce}'"]
+    if needs_wasm:
+        script_sources.append("'wasm-unsafe-eval'")
+
     policy = {
         'default-src': "'self'",
-        # wasm-unsafe-eval needed for Argon2 WASM in the browser
-        'script-src': ["'self'", f"'nonce-{nonce}'", "'wasm-unsafe-eval'"],
-        # style nonces are strictly enforced to block 'unsafe-inline' style injections
+        'script-src': script_sources,
         'style-src': ["'self'", f"'nonce-{nonce}'"],
         'font-src': "'self'",
         'img-src': "'self' data:",
@@ -141,11 +175,6 @@ def add_csp_headers(response):
     for key, value in policy.items():
         parts.append(f"{key} {' '.join(value) if isinstance(value, list) else value}")
     response.headers['Content-Security-Policy'] = '; '.join(parts)
-    response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
-    response.headers['Pragma'] = 'no-cache'
-    response.headers['Expires'] = '0'
-    # Override server headers to prevent technology/version leaks
-    response.headers['Server'] = 'SecurePersonalVault'
     return response
 
 # Mail
@@ -157,7 +186,14 @@ app.config['MAIL_PASSWORD'] = os.getenv('MAIL_PASSWORD')
 app.config['MAIL_DEFAULT_SENDER'] = os.getenv('MAIL_USERNAME')
 mail = Mail(app)
 
-limiter = Limiter(get_remote_address, app=app, default_limits=["1000 per day", "100 per hour"])
+_redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
+limiter = Limiter(
+    get_remote_address,
+    app=app,
+    default_limits=["10000 per day", "1000 per hour"],
+    storage_uri=_redis_url,
+    storage_options={"protocol": 2},
+)
 
 redis_client = app.config['SESSION_REDIS']
 
@@ -441,12 +477,6 @@ def get_ip_location(ip: str | None) -> str:
     For local development (127.0.0.1 / private IP), resolves public WAN IP
     so real location is shown during local testing.
     """
-    if request and hasattr(request, 'headers'):
-        forwarded = request.headers.get('X-Forwarded-For')
-        if forwarded:
-            candidate = forwarded.split(',')[0].strip()
-            ip = _validate_ip(candidate) or ip
-
     if not ip or ip == 'localhost' or _is_private_or_local(ip):
         try:
             pub_resp = requests.get('https://api.ipify.org?format=json', timeout=2)
@@ -880,6 +910,7 @@ def before_request():
         'signup', 'request_signup_otp', 'verify_signup_otp',
         'set_password', 'get_signup_salt', 'create_account',
         'static', 'terminate_sessions', 'request_logout_link', 'terms',
+        'robots_txt', 'sitemap_xml',
     ]
     if request.endpoint in public_endpoints:
         return
@@ -1115,6 +1146,16 @@ def verify_login():
 
     flash('OTP verified! Please enter your master password.', 'success')
     return redirect(url_for('login', step='password'))
+
+# ---- Static crawlers / bot files ----
+
+@app.route('/robots.txt')
+def robots_txt():
+    return "User-agent: *\nDisallow: /", 200, {'Content-Type': 'text/plain'}
+
+@app.route('/sitemap.xml')
+def sitemap_xml():
+    return '<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"></urlset>', 200, {'Content-Type': 'application/xml'}
 
 # ---- Signup ----
 
@@ -1526,7 +1567,7 @@ def api_list_records():
                     for r in records])
 
 @app.route('/api/records', methods=['POST'])
-@limiter.limit("100 per hour")
+@limiter.limit("1000 per hour")
 def api_create_record():
     """
     Expects JSON: { "ciphertext": "<base64 AES-GCM blob>" }
@@ -2052,7 +2093,7 @@ def api_list_secret_records():
                     for r in records])
 
 @app.route('/api/secret/records', methods=['POST'])
-@limiter.limit("100 per hour")
+@limiter.limit("1000 per hour")
 def api_create_secret_record():
     user, err = _require_secret_unlocked()
     if err:
@@ -2294,4 +2335,5 @@ except Exception:
     pass
 
 if __name__ == '__main__':
-    app.run(host='127.0.0.1', port=5000, debug=False)
+   # app.run(host='127.0.0.1', port=5000, debug=False)
+   app.run(host='0.0.0.0', port=5000, debug=False)
