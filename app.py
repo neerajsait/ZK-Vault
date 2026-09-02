@@ -153,7 +153,7 @@ def add_csp_headers(response):
     needs_wasm = False
     if request.path in ('/set_password', '/vault', '/change_password'):
         needs_wasm = True
-    elif request.path == '/login' and request.args.get('step') == 'password':
+    elif request.path == '/login' and session.get('login_step') == 'password':
         needs_wasm = True
 
     script_sources = ["'self'", f"'nonce-{nonce}'"]
@@ -906,6 +906,7 @@ def clear_activity_log(session_id):
 @app.before_request
 def before_request():
     public_endpoints = [
+        'index', 'restart_login',
         'login', 'send_login_otp', 'verify_login',
         'signup', 'request_signup_otp', 'verify_signup_otp',
         'set_password', 'get_signup_salt', 'create_account',
@@ -916,7 +917,7 @@ def before_request():
         return
 
     if 'user_id' not in session:
-        flash('Please log in.', 'warning')
+        flash('Please log in.', 'danger')
         return redirect(url_for('login'))
 
     user = db_session.query(User).filter_by(id=session['user_id']).first()
@@ -927,7 +928,7 @@ def before_request():
 
     if user.logout_cooldown_until and user.logout_cooldown_until > datetime.now():
         if request.endpoint not in ['logout', 'terminate_sessions', 'request_logout_link']:
-            flash('Account temporarily locked for security.', 'warning')
+            flash('Account temporarily locked for security.', 'danger')
             return redirect(url_for('login'))
 
     unlocked_endpoints = [
@@ -943,7 +944,7 @@ def before_request():
     ]
     if request.endpoint not in unlocked_endpoints:
         if not session.get('vault_unlocked'):
-            flash('Vault is locked. Please unlock first.', 'warning')
+            flash('Vault is locked. Please unlock first.', 'danger')
             return redirect(url_for('unlock_vault'))
 
 @app.teardown_appcontext
@@ -970,7 +971,7 @@ def _error_response(code: int, title: str, message: str):
 def handle_csrf_error(e):
     if _wants_json():
         return jsonify(error='CSRF token missing or invalid. Refresh and retry.'), 403
-    flash('Your session expired. Please try again.', 'warning')
+    flash('Your session expired. Please try again.', 'danger')
     return redirect(url_for('login'))
 
 @app.errorhandler(400)
@@ -1038,11 +1039,22 @@ def handle_all_exceptions(e):
 
 @app.route('/')
 def index():
+    if session.get('user_id') and session.get('vault_unlocked'):
+        return redirect(url_for('vault'))
+    session.pop('login_step', None)
+    return redirect(url_for('login'))
+
+@app.route('/login/restart')
+def restart_login():
+    session.pop('login_step', None)
+    session.pop('login_email', None)
     return redirect(url_for('login'))
 
 @app.route('/login', methods=['GET'])
 def login():
-    step = request.args.get('step', 'email')
+    if request.args:
+        return redirect(url_for('login'))
+    step = session.get('login_step', 'email')
     email = session.get('login_email', '')
     salt = ''
     if step in ('otp', 'password') and email:
@@ -1053,14 +1065,17 @@ def login():
     return render_template('login.html', step=step, email=email, salt=salt, after_signup=after_signup)
 
 @app.route('/send_login_otp', methods=['POST'])
-@limiter.limit("5 per minute")
+@limiter.limit("3 per minute")
+@limiter.limit("1 per 30 seconds", key_func=lambda: request.form.get('email', ''))
+@limiter.limit("8 per hour", key_func=lambda: request.form.get('email', ''))
 def send_login_otp():
     raw_email = request.form.get('email')
     try:
         validate_email(raw_email, check_disposable=False)
     except ValueError:
-        flash('Invalid email or OTP.', 'warning')
-        return redirect(url_for('login', step='email'))
+        flash('Invalid email or OTP.', 'danger')
+        session['login_step'] = 'email'
+        return redirect(url_for('login'))
 
     email = raw_email.strip().lower()
     user = db_session.query(User).filter_by(email_index=make_email_index(email)).first()
@@ -1083,7 +1098,8 @@ def send_login_otp():
         sent = send_email(email, '[ZK Vault] Login Verification Code', body)
         if not sent:
             flash('Failed to send login verification code email. Please try again.', 'danger')
-            return redirect(url_for('login', step='email'))
+            session['login_step'] = 'email'
+            return redirect(url_for('login'))
     else:
         # Non-existing user: do equivalent-shaped work to reduce timing asymmetry.
         dummy_code_str = f"{secrets.randbelow(1000000):06d}"
@@ -1093,9 +1109,10 @@ def send_login_otp():
         except RedisError:
             pass
 
-    flash('If the email is registered, an OTP will be sent.', 'info')
+    flash('If the email is registered, an OTP will be sent.', 'success')
     session['login_email'] = email
-    return redirect(url_for('login', step='otp'))
+    session['login_step'] = 'otp'
+    return redirect(url_for('login'))
 
 @app.route('/verify_login', methods=['POST'])
 @limiter.limit("10 per minute")
@@ -1104,17 +1121,20 @@ def verify_login():
     otp = request.form.get('otp')
     if not email or not otp:
         flash('Invalid email or OTP.', 'danger')
-        return redirect(url_for('login', step='otp'))
+        session['login_step'] = 'otp'
+        return redirect(url_for('login'))
 
     user = db_session.query(User).filter_by(email_index=make_email_index(email)).first()
     if not user or (user.logout_cooldown_until and user.logout_cooldown_until > datetime.now()):
         flash('Invalid email or OTP.', 'danger')
-        return redirect(url_for('login', step='otp'))
+        session['login_step'] = 'otp'
+        return redirect(url_for('login'))
 
     ok, msg = login_otp.verify_otp(email, otp, prefix=RedisOTP.LOGIN_PREFIX)
     if not ok:
         flash('Invalid email or OTP.', 'danger')
-        return redirect(url_for('login', step='otp'))
+        session['login_step'] = 'otp'
+        return redirect(url_for('login'))
 
     after_signup = session.get('after_signup', False)
     # Session fixation protection
@@ -1145,7 +1165,8 @@ def verify_login():
         logger.error(f"Login alert failed: {e}")
 
     flash('OTP verified! Please enter your master password.', 'success')
-    return redirect(url_for('login', step='password'))
+    session['login_step'] = 'password'
+    return redirect(url_for('login'))
 
 # ---- Static crawlers / bot files ----
 
@@ -1176,7 +1197,7 @@ def request_signup_otp():
         validate_email(raw_email)
         validate_name(name)
     except ValueError:
-        flash("Invalid email or name.", 'warning')
+        flash("Invalid email or name.", 'danger')
         return render_template('signup.html')
 
     user_exists = bool(db_session.query(User).filter_by(email_index=make_email_index(raw_email)).first())
@@ -1197,8 +1218,9 @@ def request_signup_otp():
         )
         send_email(raw_email, '[ZK Vault] Login Verification Code', body, sync=True)
         session['login_email'] = raw_email
-        flash('An account with this email already exists. A login verification code has been sent to your email.', 'info')
-        return redirect(url_for('login', step='otp'))
+        flash('An account with this email already exists. A login verification code has been sent to your email.', 'success')
+        session['login_step'] = 'otp'
+        return redirect(url_for('login'))
 
     code_str = f"{secrets.randbelow(1000000):06d}"
     signup_otp.set_otp(raw_email, code_str)
@@ -1245,7 +1267,7 @@ def verify_signup_otp():
 @app.route('/set_password', methods=['GET'])
 def set_password():
     if 'signup_verified_email' not in session:
-        flash('Please verify your email first.', 'warning')
+        flash('Please verify your email first.', 'danger')
         return redirect(url_for('signup'))
     return render_template('set_password.html', email=session['signup_verified_email'])
 
@@ -1273,7 +1295,7 @@ def get_signup_salt():
 @limiter.limit("5 per minute")
 def create_account():
     if 'signup_verified_email' not in session:
-        flash('Email verification required.', 'warning')
+        flash('Email verification required.', 'danger')
         return redirect(url_for('signup'))
 
     verifier_b64 = request.form.get('verifier', '').strip()
@@ -1285,7 +1307,7 @@ def create_account():
 
     salt_b64 = session.pop('pending_salt', None)
     if not salt_b64:
-        flash('Session expired. Please start again.', 'warning')
+        flash('Session expired. Please start again.', 'danger')
         return redirect(url_for('set_password'))
 
     email = session['signup_verified_email']
@@ -1356,14 +1378,14 @@ def create_account():
 @limiter.limit("5 per hour")
 def request_logout_link():
     if 'user_id' not in session:
-        flash('Please log in.', 'warning')
+        flash('Please log in.', 'danger')
         return redirect(url_for('login'))
     user = db_session.query(User).filter_by(id=session['user_id']).first()
     if not user:
         session.clear()
         return redirect(url_for('login'))
     if user.logout_cooldown_until and user.logout_cooldown_until > datetime.now():
-        flash('Account temporarily locked.', 'warning')
+        flash('Account temporarily locked.', 'danger')
         return redirect(url_for('login'))
     try:
         token = generate_logout_token(user.id)
@@ -1404,7 +1426,7 @@ def terminate_sessions(token):
             db_session.commit()
             send_session_terminated_alert(user, 15)
         session.clear()
-        flash('All active sessions have been terminated.', 'info')
+        flash('All active sessions have been terminated.', 'success')
         return redirect(url_for('login'))
     else:
         user_id = get_user_id_from_logout_token(token)
@@ -1438,8 +1460,13 @@ def terminate_sessions(token):
 @limiter.limit("1000 per day")
 def vault():
     if 'user_id' not in session:
-        flash('Please log in.', 'warning')
+        flash('Please log in.', 'danger')
         return redirect(url_for('login'))
+        
+    if not session.get('vault_unlocked') and not session.get('vault_failed_attempt'):
+        session['login_step'] = 'password'
+        return redirect(url_for('login'))
+
     user = db_session.query(User).filter_by(id=session['user_id']).first()
     if not user:
         session.clear()
@@ -1458,7 +1485,7 @@ def unlock_vault():
     if 'user_id' not in session:
         if request.headers.get('X-Requested-With') == 'XMLHttpRequest' or request.is_json:
             return jsonify(error='Please log in.'), 401
-        flash('Please log in.', 'warning')
+        flash('Please log in.', 'danger')
         return redirect(url_for('login'))
 
     user = db_session.query(User).filter_by(id=session['user_id']).first()
@@ -1471,7 +1498,7 @@ def unlock_vault():
     if user.logout_cooldown_until and user.logout_cooldown_until > datetime.now():
         if request.headers.get('X-Requested-With') == 'XMLHttpRequest' or request.is_json:
             return jsonify(error='Account temporarily locked.'), 403
-        flash('Account temporarily locked.', 'warning')
+        flash('Account temporarily locked.', 'danger')
         return redirect(url_for('login'))
 
     if request.method == 'GET':
@@ -1482,6 +1509,7 @@ def unlock_vault():
     try:
         validate_verifier_b64(verifier_b64, 'verifier')
     except ValueError as e:
+        session['vault_failed_attempt'] = True
         if request.headers.get('X-Requested-With') == 'XMLHttpRequest' or request.is_json:
             return jsonify(error=str(e)), 400
         flash(str(e), 'danger')
@@ -1510,10 +1538,12 @@ def unlock_vault():
 
     user = db_session.query(User).filter_by(id=session['user_id']).with_for_update().first()
     if not apply_vault_lockout(user):
+        session['vault_failed_attempt'] = True
         if request.headers.get('X-Requested-With') == 'XMLHttpRequest' or request.is_json:
             return jsonify(error='Too many vault unlock failures. Please log in again.', relogin=True), 403
         return redirect(url_for('login'))
 
+    session['vault_failed_attempt'] = True
     if request.headers.get('X-Requested-With') == 'XMLHttpRequest' or request.is_json:
         return jsonify(error='Incorrect vault password.'), 400
     return redirect(url_for('vault'))
@@ -1923,7 +1953,7 @@ def secret_setup():
     if 'user_id' not in session:
         if request.headers.get('X-Requested-With') == 'XMLHttpRequest' or request.is_json:
             return jsonify(error='Please log in.'), 401
-        flash('Please log in.', 'warning')
+        flash('Please log in.', 'danger')
         return redirect(url_for('login'))
     user = db_session.query(User).filter_by(id=session['user_id']).first()
     if not user:
@@ -1933,7 +1963,7 @@ def secret_setup():
     if user.secret_salt:
         if request.headers.get('X-Requested-With') == 'XMLHttpRequest' or request.is_json:
             return jsonify(error='Secret vault already set up.'), 400
-        flash('Secret vault already set up.', 'info')
+        flash('Secret vault already set up.', 'success')
         return redirect(url_for('secret_unlock'))
 
     if request.method == 'GET':
@@ -1977,7 +2007,7 @@ def secret_unlock():
     if 'user_id' not in session:
         if request.headers.get('X-Requested-With') == 'XMLHttpRequest' or request.is_json:
             return jsonify(error='Please log in.'), 401
-        flash('Please log in.', 'warning')
+        flash('Please log in.', 'danger')
         return redirect(url_for('login'))
     user = db_session.query(User).filter_by(id=session['user_id']).first()
     if not user:
@@ -1987,12 +2017,12 @@ def secret_unlock():
     if not user.secret_salt:
         if request.headers.get('X-Requested-With') == 'XMLHttpRequest' or request.is_json:
             return jsonify(error='Secret vault not set up.'), 400
-        flash('Secret vault not set up. Please set it up first.', 'info')
+        flash('Secret vault not set up. Please set it up first.', 'success')
         return redirect(url_for('secret_setup'))
     if user.secret_reauthentication_required:
         if request.headers.get('X-Requested-With') == 'XMLHttpRequest' or request.is_json:
             return jsonify(error='Re-authentication required.'), 403
-        flash('Too many failures. Please re-authenticate.', 'warning')
+        flash('Too many failures. Please re-authenticate.', 'danger')
         return redirect(url_for('secret_reauth'))
     if user.secret_lock_until and user.secret_lock_until > datetime.now():
         remaining = int((user.secret_lock_until - datetime.now()).total_seconds() // 60)
@@ -2168,14 +2198,14 @@ SECRET_REAUTH_OTP_TTL = 600
 def secret_reauth():
     uid = session.get('user_id')
     if not uid:
-        flash('Please log in.', 'warning')
+        flash('Please log in.', 'danger')
         return redirect(url_for('login'))
     user = db_session.query(User).filter_by(id=uid).first()
     if not user:
         session.clear()
         return redirect(url_for('login'))
     if not user.secret_reauthentication_required:
-        flash('Re-authentication not required.', 'info')
+        flash('Re-authentication not required.', 'success')
         return redirect(url_for('secret_unlock'))
 
     if request.method == 'POST':
@@ -2215,7 +2245,7 @@ def secret_reauth():
 def secret_reauth_verify():
     uid = session.get('user_id')
     if not uid:
-        flash('Please log in.', 'warning')
+        flash('Please log in.', 'danger')
         return redirect(url_for('login'))
     user = db_session.query(User).filter_by(id=uid).first()
     if not user:
@@ -2273,10 +2303,10 @@ def secret_reauth_verify():
 def delete_account():
     uid = session.get('user_id')
     if not uid:
-        flash('Please log in.', 'warning')
+        flash('Please log in.', 'danger')
         return redirect(url_for('login'))
     if not session.get('vault_unlocked'):
-        flash('Please unlock your vault first.', 'warning')
+        flash('Please unlock your vault first.', 'danger')
         return redirect(url_for('unlock_vault'))
 
     user = db_session.query(User).filter_by(id=uid).first()
@@ -2304,7 +2334,7 @@ def delete_account():
     db_session.commit()
     send_account_deletion_alert(user_email)
     session.clear()
-    flash('Account deleted.', 'info')
+    flash('Account deleted.', 'success')
     return redirect(url_for('login'))
 
 # ----------------------------------------------------------------------
@@ -2324,7 +2354,7 @@ def logout():
             if hasattr(session, 'sid'):
                 remove_user_session(uid, session.sid)
     session.clear()
-    flash('Logged out.', 'info')
+    flash('Logged out.', 'success')
     return redirect(url_for('login'))
 
 # Monkeypatch Werkzeug to obfuscate the Server header version information
@@ -2335,5 +2365,4 @@ except Exception:
     pass
 
 if __name__ == '__main__':
-   # app.run(host='127.0.0.1', port=5000, debug=False)
-   app.run(host='0.0.0.0', port=5000, debug=False)
+    app.run(host='127.0.0.1', port=5000, debug=False)

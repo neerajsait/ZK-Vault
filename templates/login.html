@@ -20,7 +20,7 @@
             </div>
             <button type="submit" class="btn primary btn-full">Verify OTP</button>
         </form>
-        <p class="text-link"><a href="{{ url_for('login') }}">← Back to email</a></p>
+        <p class="text-link"><a href="{{ url_for('restart_login') }}">← Back to email</a></p>
 
         {% elif step == 'password' %}
         <p class="card-subtitle">Enter your master password to unlock your encrypted data.</p>
@@ -39,7 +39,7 @@
                 Vault</button>
 
         </form>
-        <p class="text-link"><a href="{{ url_for('login') }}">← Back to email</a></p>
+        <p class="text-link"><a href="{{ url_for('restart_login') }}">← Back to email</a></p>
 
         {% else %}
         <p class="card-subtitle">Enter your email to receive a one‑time access code.</p>
@@ -123,6 +123,9 @@
 
                 if (resp.ok && data.success) {
                     sessionStorage.setItem('_transient_vault_key', bytesToBase64(key1));
+                    if (afterSignup) {
+                        sessionStorage.setItem('_create_welcome_record', 'true');
+                    }
                     if (statusEl) {
                         statusEl.className = 'status ok';
                         statusEl.textContent = 'Password verified! Opening decrypted vault…';
