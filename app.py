@@ -87,10 +87,10 @@ app.config['SESSION_REDIS'] = redis.from_url(
 app.config['SESSION_KEY_PREFIX'] = 'session:'
 app.config['SESSION_USE_SIGNER'] = True
 app.config['SESSION_PERMANENT'] = True
-app.config['SESSION_COOKIE_HTTPONLY'] = True
-app.config['SESSION_COOKIE_SECURE'] = True if not app.debug else False
-app.config['SESSION_COOKIE_SAMESITE'] = 'Strict'
 _force_https = os.getenv('FORCE_HTTPS', 'false').lower() in ('true', '1', 'yes')
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['SESSION_COOKIE_SECURE'] = _force_https
+app.config['SESSION_COOKIE_SAMESITE'] = 'Strict'
 if _force_https:
     app.config['SESSION_COOKIE_NAME'] = '__Host-zkv_sess'
 else:
