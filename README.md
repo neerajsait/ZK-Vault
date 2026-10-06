@@ -31,7 +31,7 @@ Server-side password managers expose all secrets if the database or admin is com
 - **Ciphertext byte-size is stored in cleartext** for quota enforcement — metadata leak.
 - **GeoIP lookup sends alert-email IPs to `ipapi.co`** over HTTPS. Drop `get_ip_location` if you consider this a privacy issue.
 - **Not independently audited.** Use accordingly.
-- **No Docker compose file yet** — manual setup required (see below).
+- **A `docker-compose.yml` is provided** to easily spin up the app, MySQL, and Redis, or you can run it manually.
 
 ---
 
@@ -174,7 +174,28 @@ Redis  ←  sessions, OTP codes, rate limits, activity logs
 
 ## 🚀 Installation & Setup
 
-### 1. Create the database
+### 1. Generate cryptographic keys
+Run this command **three times** to generate three independent 32-byte keys:
+```powershell
+python -c "import os, base64; print(base64.b64encode(os.urandom(32)).decode())"
+```
+
+### 2. Configure `.env`
+Copy `.env.example` to `.env` and fill in your generated keys and SMTP credentials.
+```powershell
+cp .env.example .env
+```
+
+### 3. Run with Docker (Recommended)
+Make sure Docker Desktop is running, then just run:
+```powershell
+docker-compose up -d --build
+```
+Open [http://127.0.0.1:5000](http://127.0.0.1:5000). The database and Redis will be created automatically.
+
+---
+
+### 3 (Alternative). Run Manually without Docker
 ```sql
 CREATE DATABASE secure_vault CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 ```
@@ -351,7 +372,7 @@ CREATE DATABASE secure_vault;
 ## 🗺️ Roadmap
 
 - [ ] Alembic migrations (replace `create_all` + `ALTER TABLE at import`)
-- [ ] Docker Compose file
+- [x] Docker Compose file
 - [ ] Subresource Integrity (SRI) for client bundle
 - [ ] WebAuthn second factor
 - [ ] Independent security review
