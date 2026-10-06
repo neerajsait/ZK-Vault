@@ -1,41 +1,37 @@
-# 🔒 Zero-Knowledge Vault (zk-vault)
+# 🔒 zk-vault
 
-Welcome to **zk-vault**! A production-grade, highly secure, zero-knowledge web application designed for storing credentials, notes, and secret files. 
-
-What makes this vault special is its **Zero-Knowledge Architecture**. All cryptographic operations (key derivation, encryption, and decryption) occur directly inside your browser. Your plain text passwords and files are never transmitted to the server. The backend only sees and stores encrypted blobs and hashes of derived verifiers. Even in the event of a full database breach, your records remain completely safe and unreadable.
-
----
-
-## 📖 Table of Contents
-
-1. [Architectural Overview (How It Works)](#-architectural-overview-how-it-works)
-2. [Cryptographic Sequence Diagrams](#-cryptographic-sequence-diagrams)
-3. [Security Hardening Features](#-security-hardening-features)
-4. [Prerequisites](#-prerequisites)
-5. [Step-by-Step Installation & Setup](#-step-by-step-installation--setup)
-6. [Environment Configuration (`.env`)](#-environment-configuration-env)
-7. [Running the Application](#-running-the-application)
-8. [Database Schema (`mysql.txt`)](#-database-schema-mysqltxt)
-9. [Verification & Testing (`test_app.py`)](#-verification--testing-test_appy)
-10. [API Endpoint Reference](#-api-endpoint-reference)
-11. [Troubleshooting Common Issues](#-troubleshooting-common-issues)
-12. [Security Policy & Threat Model (SECURITY.md)](#-security-policy--threat-model)
-
----
-
-## 🧠 Architectural Overview (How It Works)
-
-The vault ensures total privacy by establishing two layers of isolation: client-side processing for user secrets, and server-side hardening for authentication verification and rate limiting.
-
-1. **Key Derivation (Argon2id):** When you sign up, your browser takes your Master Password and a unique random 16-byte salt and runs it through **Argon2id** (configured for 64MB memory, 3 iterations, 1 parallelism). This yields a 256-bit cryptographic master key (`key1`).
-2. **Local Encryption (AES-GCM):** Before any vault entry or file leaves your computer, it is serialized into a JSON envelope and encrypted locally via **AES-GCM (256-bit)** using `key1`. The browser generates a fresh 12-byte initialization vector (IV) for every encryption operation.
-3. **Authentication via Login Verifiers:** Instead of sending your password to authenticate, the client derives a secondary key using **HKDF-SHA256** from `key1` with the info label `login-verifier`. The server stores a double-hashed version of this verifier (further secured with a server-side HMAC secret).
-4. **Zero-Knowledge Password Changes:** To change your password, the client downloads all encrypted payloads, decrypts them locally using the old key, re-encrypts them with the new key (derived from the new password and a new salt), and sends them in a single batch transaction to the server. The server replaces the salt, the verifier, and the encrypted payloads atomically.
+Zero-knowledge encrypted vault for credentials, notes, and files. Encryption and key derivation run in the browser; the server stores ciphertext and a hashed login verifier only.
 
 > [!CAUTION]
-> **⚠️ CRITICAL WARNING: NO PASSWORD RESET PATHWAY**
-> Because this is a zero-knowledge architecture, your master password **never leaves your device** and is never known by the server. 
-> There is **no "Reset Password" button**. If you forget your Master Password, **your stored vault items are permanently lost**. No administrator or developer can decrypt them.
+> **NO PASSWORD RESET — BY DESIGN.** Your master password never leaves your device. If you lose it, your vault contents are permanently unrecoverable.
+
+---
+
+## The Problem
+
+Server-side password managers expose all secrets if the database or admin is compromised. zk-vault keeps keys on the client so a database breach yields only ciphertext.
+
+---
+
+## Threat Model
+
+| Asset | Adversary | Mitigation |
+|---|---|---|
+| Vault contents | DB thief / curious admin | AES-256-GCM client-side; server never sees the key |
+| Master password | Offline cracker with DB | Argon2id (client) + Argon2id over HMAC'd verifier (server pepper) |
+| Login verifier | DB thief | Argon2id server-side hash + optional HMAC pepper ties hash to server secret |
+| Email addresses | DB thief | AES-GCM encrypted at rest + HMAC-indexed (plaintext never stored) |
+| Sessions | XSS, CSRF, fixation | Nonce-based CSP, CSRF tokens, HttpOnly/Secure/SameSite=Strict, Redis server-side sessions |
+| Accounts | Online brute force | Rate limiting, OTP attempt caps, escalating lockouts (30 min → 24 h → 7 d → 1 yr) |
+
+### Known Limits (read these)
+
+- **A malicious or compromised server can serve modified JavaScript and steal your key.** This is the standard limit of all browser-based E2EE. Mitigations (Subresource Integrity, browser extension, native client) are future work.
+- **No password recovery.** By design.
+- **Ciphertext byte-size is stored in cleartext** for quota enforcement — metadata leak.
+- **GeoIP lookup sends alert-email IPs to `ipapi.co`** over HTTPS. Drop `get_ip_location` if you consider this a privacy issue.
+- **Not independently audited.** Use accordingly.
+- **No Docker compose file yet** — manual setup required (see below).
 
 ---
 
@@ -107,7 +103,7 @@ sequenceDiagram
 ---
 
 ### 3. Encrypted Vault Data Operations
-Handles reading and writing of records. Payton data contains both metadata and file attachments.
+Handles reading and writing of records. Payload data contains both metadata and file attachments.
 
 ```mermaid
 sequenceDiagram
@@ -134,214 +130,239 @@ sequenceDiagram
 
 ---
 
-## 🛡️ Security Hardening Features
+## 🛡️ Security Features (as implemented)
 
-This application implements rigorous security safeguards to counter a wide array of web vulnerabilities:
+- **Client-side KDF** — Argon2id (64 MB, 3 iterations, 1 parallelism) in WASM
+- **HKDF-derived login verifier** — raw password never leaves the browser
+- **Server-side HMAC pepper** — optional `VERIFIER_HMAC_KEY`; ties the verifier hash to a server secret so a stolen DB alone cannot run offline attacks
+- **AES-256-GCM** with a fresh 12-byte IV per encryption operation
+- **Email encrypted at rest** — AES-GCM + HMAC index; plaintext email never stored in DB
+- **Email addresses masked in log files** — logs show `u***@example.com`, not plaintext
+- **OTP timing-safe comparison** — `hmac.compare_digest` used for all OTP checks
+- **UTC timestamps** — all lockout comparisons use `datetime.utcnow()`
+- **CSRF** — Flask-WTF tokens on all forms
+- **Nonce-based CSP** + HSTS + `X-Frame-Options: DENY` + `X-Content-Type-Options: nosniff`
+- **Redis server-side sessions** — session data never in browser cookie
+- **Escalating lockouts** — 30 min → 24 h → 7 d → 1 yr after repeated failures, with row locking
+- **Rate limiting** — Flask-Limiter on OTP and login routes
+- **Input-length validation** before hashing to prevent DoS via oversized inputs
+- **SSRF hardening** on disposable-email check — hardcoded URL, no redirects, short timeout
 
-* **Zero-Knowledge Architecture:** Cryptographic encryption and key derivation occur strictly inside the browser. No plaintext secrets or keys are sent to or stored on the server.
-* **Double-Layer Password Protection:** The database stores password verifiers hashed using Argon2id. Furthermore, a server-side `VERIFIER_HMAC_KEY` is mixed into the verifier hash, meaning an attacker who steals only the database cannot run offline dictionary attacks.
-* **Email Address Encryption (At Rest):** User email addresses are encrypted at rest in the database using the server's `EMAIL_ENCRYPTION_KEY`, and indexed via a salted `EMAIL_INDEX_KEY` HMAC. This prevents mass email leaks.
-* **Brute-Force Lockouts:** Accounts are locked automatically for increasing durations (30 minutes, 24 hours, up to 1 year/permanent lockout) after multiple incorrect password attempts.
-* **Form CSRF Protection:** All input forms are secured with token validation using `Flask-WTF` to block Cross-Site Request Forgery.
-* **Strict Content Security Policy (CSP):** Employs strict CSP headers via `Flask-Talisman` with dynamic scripts nonces to block XSS and code injection, and disables remote CDN script loading.
-* **Server-Side Sessions (Redis):** Login session data is kept in memory on Redis rather than in browser cookies, preventing session hijacking or manipulation.
-* **SSRF (Server-Side Request Forgery) Hardening:** Restricts disposable email domain checking to a hardcoded domain with zero redirects and short timeouts, blocking SSRF vulnerabilities.
-* **Rate Limiting:** Protects sensitive server routes (like OTP generation and logins) using `Flask-Limiter` to prevent automated scraping or denial of service.
+---
+
+## Architecture
+
+```
+Browser (Argon2id WASM · HKDF · AES-GCM)
+    ↓ HTTPS
+Flask (CSRF · CSP · rate-limit · session)
+    ↓
+MySQL  ←  ciphertext, verifier hashes, encrypted emails
+Redis  ←  sessions, OTP codes, rate limits, activity logs
+```
 
 ---
 
 ## 🛠️ Prerequisites
 
-To run this project, make sure you have the following services and software installed locally:
-
-* **Python 3.8+**
-* **MySQL 8.0+** or MariaDB
-* **Redis** (Used for session storage and rate limiting)
-* **Node.js & npm** (For executing local frontend components if utilizing dev tools)
+- Python 3.11+
+- MySQL 8.0+ or MariaDB
+- Redis 7+
+- Node.js & npm (only if modifying frontend assets)
 
 ---
 
-## 🚀 Step-by-Step Installation & Setup
+## 🚀 Installation & Setup
 
-### 1. Configure the Database
-Log into your local MySQL CLI or desktop client and run:
+### 1. Create the database
 ```sql
 CREATE DATABASE secure_vault CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 ```
 
-### 2. Set Up Python Virtual Environment
-Navigate to the `s` directory and run:
+### 2. Set up Python virtual environment
 ```powershell
-# Create venv
 python -m venv .venv
 
-# Activate venv (PowerShell)
+# Activate (PowerShell)
 .venv\Scripts\Activate.ps1
 
-# Activate venv (bash/mac)
+# Activate (bash/macOS)
 source .venv/bin/activate
 
-# Install dependencies
 pip install -r requirements.txt
 ```
 
-### 3. Generate Cryptographic Secret Keys
-Generate cryptographically strong keys for your `.env` configuration file by running:
+### 3. Generate cryptographic keys
+Run this command **three times** to generate three independent 32-byte keys:
 ```powershell
 python -c "import os, base64; print(base64.b64encode(os.urandom(32)).decode())"
 ```
-Run this command 3 times to get 3 unique keys for the configuration.
 
----
-
-## ⚙️ Environment Configuration (`.env`)
-
-Create a `.env` file in the root of the `s` folder. Copy the parameters from your newly generated keys and configure your local settings:
+### 4. Configure `.env`
+Copy `.env.example` and fill in your values:
+```powershell
+cp .env.example .env
+```
 
 ```env
-# Flask Settings
-SECRET_KEY=ReplaceWithRandomString32CharsOrMore!
-WTF_CSRF_SECRET_KEY=ReplaceWithAnotherLongRandomString!
+# Flask
+SECRET_KEY=<32-byte-random-string>
+WTF_CSRF_SECRET_KEY=<another-32-byte-random-string>
 FORCE_HTTPS=false
 
-# Base64 Encoded Cryptographic Secret Keys (32 bytes)
-VERIFIER_HMAC_KEY=base64_generated_key_1_here==
-EMAIL_ENCRYPTION_KEY=base64_generated_key_2_here==
-EMAIL_INDEX_KEY=base64_generated_key_3_here==
+# Cryptographic keys (base64, 32 bytes each)
+VERIFIER_HMAC_KEY=<generated-key-1>
+EMAIL_ENCRYPTION_KEY=<generated-key-2>
+EMAIL_INDEX_KEY=<generated-key-3>
 
-# Redis Session Store URL
+# Redis
 REDIS_URL=redis://localhost:6379/0
 
-# Database Settings
+# MySQL
 MYSQL_HOST=localhost
 MYSQL_USER=your_mysql_user
 MYSQL_PASSWORD=your_mysql_password
 MYSQL_DB=secure_vault
 
-# Mail/SMTP Configuration (for OTP delivery)
+# SMTP (Gmail App Password recommended)
 MAIL_SERVER=smtp.gmail.com
 MAIL_PORT=587
 MAIL_USE_TLS=True
-MAIL_USERNAME=your_sender_account@gmail.com
-MAIL_PASSWORD=your_gmail_app_password
+MAIL_USERNAME=your_sender@gmail.com
+MAIL_PASSWORD=your_app_password
 
 # Quotas
 MAX_RECORDS_PER_USER=1000
 MAX_STORAGE_PER_USER_MB=100
 ```
 
----
-
-## 🏃 Running the Application
-
-### 1. Start Services
-Verify that the **MySQL** and **Redis** servers are running:
-* **Windows (Redis Service):** Ensure the `redis-server` command or Windows Service is running.
-* **MySQL:** Ensure the MySQL daemon is listening.
-
-### 2. Launch the Flask App
+### 5. Run
 ```powershell
 python app.py
 ```
-The server will bind to `127.0.0.1:5000` by default. Open [http://127.0.0.1:5000](http://127.0.0.1:5000) in your web browser.
+Open [http://127.0.0.1:5000](http://127.0.0.1:5000).
 
-### 3. Wipe and Reset Database (Development Only)
-If you need to drop all tables and recreate the clean schema, run:
+### 6. Reset database (development only)
 ```powershell
 python wipe_db.py
 ```
-*(This command will prompt you for confirmation and is disabled in production).*
+Prompts for confirmation. Never run in production.
 
 ---
 
-## 🗄️ Database Schema (`mysql.txt`)
+## 🧪 Verification & Testing
 
-For manual inspection, the physical database tables mapped by SQLAlchemy models are defined as follows:
+### Integration test
+Requires a running Flask server and Redis. Reads OTP codes directly from Redis (no real email needed):
+```powershell
+python test_app.py
+```
 
-* **`users` Table:** Holds user credentials metadata, client salts, verifier hashes, failed login counters, and locks.
-* **`normal_records` Table:** Stores the client-side AES-GCM encrypted payload and total byte sizes of normal vault items.
-* **`secret_records` Table:** Houses records residing in the secondary "Secret Vault" partition.
+### CI (GitHub Actions)
+Every push runs:
+- `pytest` — integration tests
+- `bandit` — static security analysis
+- `pip-audit` — dependency vulnerability scan
+- `gitleaks` — secret detection in git history
 
-The full SQL script is stored in [mysql.txt](file:///d:/python%20project/s/mysql.txt).
+See `.github/workflows/ci.yml`.
+
+> [!NOTE]
+> CI test results and `bandit`/`pip-audit` output will be pasted here once a run completes on the public repo.
 
 ---
 
-## 🧪 Verification & Testing (`test_app.py`)
+## Structure
 
-A full integration testing script is provided in [test_app.py](file:///d:/python%20project/s/test_app.py). This script simulates a client browser executing key derivation (Argon2id) and requesting API tokens to verify the complete vault signup and login cycle.
-
-To run the integration tests:
-1. Ensure your Flask server is running locally (`python app.py`).
-2. Run the test script in a separate terminal window:
-   ```powershell
-   python test_app.py
-   ```
+```
+s/
+├── app.py               # Flask application
+├── test_app.py          # Integration test script
+├── wipe_db.py           # Dev DB reset utility
+├── mysql.txt            # Schema reference (for manual inspection)
+├── requirements.txt     # Python dependencies
+├── .env.example         # Environment variable template
+├── static/              # Client-side JS (Argon2 WASM, AES-GCM)
+├── templates/           # Jinja2 HTML templates
+└── .github/
+    └── workflows/
+        └── ci.yml       # CI pipeline
+```
 
 ---
 
 ## 🔌 API Endpoint Reference
 
-All endpoints prefixed with `/api/` require a valid, authenticated user session where `session['vault_unlocked'] == True`.
+All `/api/` endpoints require `session['vault_unlocked'] == True`.
 
-### 1. Authentication & Keys
-| Method | Endpoint | Description | Request Payload | Response Code & Output |
-|---|---|---|---|---|
-| `POST` | `/request_signup_otp` | Dispatches signup OTP code to target email | `{"email": "...", "name": "..."}` | `200 OK` or redirects to OTP step |
-| `POST` | `/verify_signup_otp` | Validates signup OTP | `{"email": "...", "otp": "..."}` | `200 OK` |
-| `GET` | `/set_password/get_salt` | Fetches signup salt | None | `200 OK`, `{"salt": "base64_salt"}` |
-| `POST` | `/create_account` | Registers new user verifiers | `{"verifier": "base64_verifier"}` | `200 OK` |
-| `POST` | `/send_login_otp` | Sends login OTP code | `{"email": "..."}` | Redirects to OTP verification |
-| `POST` | `/verify_login` | Checks login OTP code | `{"email": "...", "otp": "..."}` | Sets user session, redirects to password unlock |
-| `POST` | `/unlock` | Verifies login verifier and unlocks vault | `{"verifier": "base64_verifier"}` | `200 OK` |
+### Authentication
+| Method | Endpoint | Description |
+|---|---|---|
+| `POST` | `/request_signup_otp` | Send OTP to email for signup |
+| `POST` | `/verify_signup_otp` | Validate signup OTP |
+| `GET` | `/set_password/get_salt` | Fetch random Argon2 salt for signup |
+| `POST` | `/create_account` | Register verifier hash |
+| `POST` | `/send_login_otp` | Send OTP to email for login |
+| `POST` | `/verify_login` | Validate login OTP |
+| `POST` | `/unlock` | Verify login verifier and unlock vault |
 
-### 2. Normal Vault Operations
-| Method | Endpoint | Description | Request Payload | Response Code & Output |
-|---|---|---|---|---|
-| `GET` | `/api/records` | Returns all records for logged-in user | None | `200 OK`, `[{"id": "...", "payload": "...", "size": 123}]` |
-| `POST` | `/api/records` | Creates a new vault record | `{"payload": "...", "size": 123}` | `200 OK`, `{"status": "success", "id": "rec_id"}` |
-| `PUT` | `/api/records/<record_id>` | Updates an existing vault record | `{"payload": "...", "size": 123}` | `200 OK`, `{"status": "success"}` |
-| `DELETE` | `/api/records/<record_id>` | Deletes a record from the database | None | `200 OK`, `{"status": "deleted"}` |
-| `GET` | `/api/records/<record_id>/file/<int:file_index>` | Returns file payload within record | None | `200 OK`, `{"ciphertext": "...", "file_index": index}` |
+### Vault Operations
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/api/records` | List all records (ciphertext) |
+| `POST` | `/api/records` | Create a new record |
+| `PUT` | `/api/records/<id>` | Update a record |
+| `DELETE` | `/api/records/<id>` | Delete a record |
+| `GET` | `/api/records/<id>/file/<int:idx>` | Fetch file payload within a record |
 
-### 3. Secret Partition Vault Operations
-| Method | Endpoint | Description | Request Payload | Response Code & Output |
-|---|---|---|---|---|
-| `GET` | `/api/secret/get_salt` | Retrieves the second secret vault salt | None | `200 OK`, `{"salt": "base64_salt"}` |
-| `POST` | `/secret/setup` | Sets up the secret vault credentials | `{"secret_salt": "...", "secret_verifier": "..."}` | Redirects to secret home |
-| `POST` | `/secret/unlock` | Unlocks secret vault partition | `{"secret_verifier": "..."}` | `200 OK` |
-| `GET` | `/api/secret/records` | Lists all secret vault records | None | `200 OK`, `[{"id": "...", "payload": "...", "size": 123}]` |
-| `POST` | `/api/secret/records` | Saves new secret record | `{"payload": "...", "size": 123}` | `200 OK` |
-| `DELETE` | `/api/secret/records/<record_id>` | Deletes a secret vault record | None | `200 OK` |
+### Secret Partition
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/api/secret/get_salt` | Fetch second vault salt |
+| `POST` | `/secret/setup` | Set up secret vault credentials |
+| `POST` | `/secret/unlock` | Unlock secret partition |
+| `GET` | `/api/secret/records` | List secret records |
+| `POST` | `/api/secret/records` | Save secret record |
+| `DELETE` | `/api/secret/records/<id>` | Delete secret record |
 
-### 4. Utilities & Settings
-| Method | Endpoint | Description | Request Payload | Response Code & Output |
-|---|---|---|---|---|
-| `POST` | `/api/change_password` | Performs local re-encryption batch update | `{"new_salt": "...", "new_verifier": "...", "records": [...]}` | `200 OK` |
-| `GET` | `/api/user_quota` | Queries storage quota consumption | None | `200 OK`, `{"records": 10, "storage": 10240}` |
-| `POST` | `/delete_account` | Deletes user record and clears database | None | Redirects to home page |
-| `GET` | `/logout` | Clears local sessions and ends transaction | None | Redirects to login page |
-
----
-
-## 🔍 Troubleshooting Common Issues
-
-### ❌ `RedisError: Connection Refused`
-* **Cause:** The Flask server started successfully, but the local Redis server is inactive.
-* **Solution:** Confirm your Redis instance is running. On Windows, open a terminal and run `redis-server` or check Windows services.
-
-### ❌ `OperationalError: (pymysql.err.OperationalError) (1049, "Unknown database 'secure_vault'")`
-* **Cause:** The database target does not exist.
-* **Solution:** Create the schema in MySQL manually:
-  ```sql
-  CREATE DATABASE secure_vault;
-  ```
-
-### ❌ Emails/OTPs fail to arrive
-* **Cause:** SMTP authentication failure or Gmail security blocker.
-* **Solution:** Ensure your `MAIL_USERNAME` and `MAIL_PASSWORD` are valid. If you are using Gmail, you **must use an App Password** rather than your primary Google Account password.
+### Utilities
+| Method | Endpoint | Description |
+|---|---|---|
+| `POST` | `/api/change_password` | Client-side re-encrypt + batch update |
+| `GET` | `/api/user_quota` | Storage quota usage |
+| `POST` | `/delete_account` | Permanently delete account |
+| `GET` | `/logout` | End session |
 
 ---
 
-## 🛡️ Security Policy & Threat Model
+## 🔍 Troubleshooting
 
-For details on supported versions, what threats are mitigated (in-scope), what threats are under user responsibility (out-of-scope), and how to report vulnerabilities, please read the [SECURITY.md](file:///d:/python%20project/s/SECURITY.md) document.
+**`RedisError: Connection Refused`** — Redis is not running. Start it with `redis-server`.
+
+**`OperationalError: Unknown database 'secure_vault'`** — Create the DB manually:
+```sql
+CREATE DATABASE secure_vault;
+```
+
+**OTP emails not arriving** — Ensure `MAIL_USERNAME` / `MAIL_PASSWORD` are correct. Gmail requires an [App Password](https://support.google.com/accounts/answer/185833) (not your main password).
+
+---
+
+## 🗺️ Roadmap
+
+- [ ] Alembic migrations (replace `create_all` + `ALTER TABLE at import`)
+- [ ] Docker Compose file
+- [ ] Subresource Integrity (SRI) for client bundle
+- [ ] WebAuthn second factor
+- [ ] Independent security review
+
+---
+
+## Author
+
+**Tiruveedhi Neeraj Venkata Sai**
+- GitHub: [@neerajsait](https://github.com/neerajsait)
+
+## License
+
+MIT — see [LICENSE](LICENSE).

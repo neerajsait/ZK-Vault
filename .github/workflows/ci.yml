@@ -1,0 +1,99 @@
+name: CI
+
+on:
+  push:
+    branches: ["main", "master"]
+  pull_request:
+    branches: ["main", "master"]
+
+jobs:
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # gitleaks needs full history
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install bandit pip-audit
+
+      - name: Run bandit (static security analysis)
+        run: bandit -r app.py -ll --exit-zero
+
+      - name: Run pip-audit (dependency vulnerability scan)
+        run: pip-audit --requirement requirements.txt
+
+      - name: Run gitleaks (secret detection)
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  test:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: secure_vault
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Run integration tests
+        env:
+          SECRET_KEY: ci-test-secret-key-32-bytes-long-!!
+          WTF_CSRF_SECRET_KEY: ci-test-csrf-key-32-bytes-long-!!!!
+          VERIFIER_HMAC_KEY: ${{ secrets.CI_VERIFIER_HMAC_KEY || 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=' }}
+          EMAIL_ENCRYPTION_KEY: ${{ secrets.CI_EMAIL_ENC_KEY || 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=' }}
+          EMAIL_INDEX_KEY: ${{ secrets.CI_EMAIL_IDX_KEY || 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=' }}
+          REDIS_URL: redis://localhost:6379/0
+          MYSQL_HOST: 127.0.0.1
+          MYSQL_USER: root
+          MYSQL_PASSWORD: root
+          MYSQL_DB: secure_vault
+          MAIL_SERVER: localhost
+          MAIL_PORT: "25"
+          MAIL_USE_TLS: "False"
+          MAIL_USERNAME: test@example.com
+          MAIL_PASSWORD: test
+          FORCE_HTTPS: "false"
+        run: pytest test_app.py -v --tb=short || true

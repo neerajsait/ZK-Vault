@@ -422,9 +422,20 @@ def send_async_email(app, msg):
     with app.app_context():
         try:
             mail.send(msg)
-            logger.info(f"Email sent to {msg.recipients[0]}: {msg.subject}")
+            # Mask recipient to avoid leaking email addresses to log files
+            masked = _mask_email(msg.recipients[0]) if msg.recipients else '[unknown]'
+            logger.info(f"Email sent to {masked}: {msg.subject}")
         except Exception as e:
-            logger.error(f"Failed to send email to {msg.recipients[0]} -- subject: {msg.subject} -- error: {e}", exc_info=True)
+            masked = _mask_email(msg.recipients[0]) if msg.recipients else '[unknown]'
+            logger.error(f"Failed to send email to {masked} -- subject: {msg.subject} -- error: {e}", exc_info=True)
+
+def _mask_email(email: str) -> str:
+    """Mask email address for logging: user@example.com -> u***@example.com"""
+    try:
+        local, domain = email.split('@', 1)
+        return f"{local[0]}***@{domain}"
+    except Exception:
+        return '***'
 
 def send_email(to, subject, body, sync=False) -> bool:
     try:
@@ -432,7 +443,7 @@ def send_email(to, subject, body, sync=False) -> bool:
         msg.body = body
         if sync or app.testing:
             mail.send(msg)
-            logger.info(f"Email sent synchronously to {to}: {subject}")
+            logger.info(f"Email sent synchronously to {_mask_email(to)}: {subject}")
             return True
         else:
             from threading import Thread
@@ -443,7 +454,7 @@ def send_email(to, subject, body, sync=False) -> bool:
             t.start()
             return True
     except Exception as e:
-        logger.error(f"Failed to send email to {to} -- subject: {subject} -- error: {e}", exc_info=True)
+        logger.error(f"Failed to send email to {_mask_email(to)} -- subject: {subject} -- error: {e}", exc_info=True)
         return False
 
 def generate_record_id():
@@ -473,17 +484,12 @@ def _validate_ip(ip_str: str) -> str | None:
 
 def get_ip_location(ip: str | None) -> str:
     """
-    Fetches geographical location for an IP address using ip-api.com (HTTPS).
-    For local development (127.0.0.1 / private IP), resolves public WAN IP
-    so real location is shown during local testing.
+    Fetches geographical location for an IP address using ipapi.co (HTTPS only).
+    For local/private IPs in development, returns a generic label rather than
+    leaking the host's public IP to a third-party service.
     """
     if not ip or ip == 'localhost' or _is_private_or_local(ip):
-        try:
-            pub_resp = requests.get('https://api.ipify.org?format=json', timeout=2)
-            if pub_resp.status_code == 200:
-                ip = pub_resp.json().get('ip')
-        except Exception:
-            return 'Local Network / Localhost'
+        return 'Local Network / Localhost'
 
     # Final validation: only proceed with a legitimate IP
     ip = _validate_ip(ip) if ip else None
@@ -491,24 +497,22 @@ def get_ip_location(ip: str | None) -> str:
         return 'Unknown Location'
 
     try:
-        # ip-api.com free tier only supports HTTP; validate ip is clean before interpolating
+        # Use HTTPS-only endpoint to protect user IP privacy in transit
         resp = requests.get(
-            f'http://ip-api.com/json/{ip}',
-            params={'fields': 'status,country,regionName,city'},
+            f'https://ipapi.co/{ip}/json/',
             timeout=2,
             allow_redirects=False,
         )
         if resp.status_code == 200:
             data = resp.json()
-            if data.get('status') == 'success':
-                city = data.get('city', '')
-                region = data.get('regionName', '')
-                country = data.get('country', '')
-                parts = [p for p in [city, region, country] if p]
-                if parts:
-                    return ', '.join(parts)
+            city = data.get('city', '')
+            region = data.get('region', '')
+            country = data.get('country_name', '')
+            parts = [p for p in [city, region, country] if p]
+            if parts:
+                return ', '.join(parts)
     except Exception as e:
-        logger.warning(f"Failed to fetch IP location for {ip}: {e}")
+        logger.warning(f"Failed to fetch IP location: {e}")
 
     return 'Unknown Location'
 
@@ -628,7 +632,7 @@ class RedisOTP:
             if attempts > 5:
                 self.delete_otp(email, prefix)
                 return False, "Too many attempts. Please request a new OTP."
-            if data['code'] != str(code):
+            if not hmac.compare_digest(data['code'], str(code)):
                 return False, f"Invalid OTP. {5 - attempts} attempts remaining."
             data['used'] = True
             redis_client.setex(self._get_key(prefix, email), self.OTP_TTL, json.dumps(data))
@@ -714,7 +718,7 @@ def send_login_alert(user, logout_link):
         "Request Details:\n"
         "- Event: Account Login\n"
         f"- Location: {loc} (IP: {ip})\n"
-        f"- Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+        f"- Time: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
         "If this wasn't you, terminate all sessions immediately:\n"
         f"{logout_link}\n\n"
         "— ZK Vault Team"
@@ -724,7 +728,7 @@ def send_login_alert(user, logout_link):
 def send_unified_logout_email(user, session_id, ip_address):
     email = safe_decrypt_email(user.encrypted_email)
     loc = get_ip_location(ip_address)
-    now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    now_str = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
 
     log_entries = get_activity_log(session_id) if session_id else []
 
@@ -761,7 +765,7 @@ def send_session_terminated_alert(user, cooldown_minutes):
         "Request Details:\n"
         "- Event: Session Termination\n"
         f"- Location: {loc} (IP: {ip})\n"
-        f"- Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+        f"- Time: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
         "— ZK Vault Team"
     )
     send_email(email, "[ZK Vault] Security Alert: Sessions Terminated", body)
@@ -775,7 +779,7 @@ def send_account_deletion_alert(email):
         "Request Details:\n"
         "- Event: Account Deletion\n"
         f"- Location: {loc} (IP: {ip})\n"
-        f"- Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+        f"- Time: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
         "— ZK Vault Team"
     )
     send_email(email, "[ZK Vault] Account Deletion Confirmation", body)
@@ -790,7 +794,7 @@ def send_password_changed_alert(user):
         "Request Details:\n"
         "- Event: Password Update\n"
         f"- Location: {loc} (IP: {ip})\n"
-        f"- Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+        f"- Time: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
         "Didn't make this change? Please contact security immediately.\n\n"
         "— ZK Vault Team"
     )
@@ -821,22 +825,22 @@ def send_vault_lockout_alert(user, permanent=False):
 # which releases the row lock.
 
 def apply_vault_lockout(user):
-    if user.lock_until and user.lock_until <= datetime.now():
+    if user.lock_until and user.lock_until <= datetime.utcnow():
         user.failed_attempts = 0
         user.lock_until = None
 
     user.failed_attempts += 1
     if user.failed_attempts == 2:
-        user.lock_until = datetime.now() + timedelta(minutes=30)
+        user.lock_until = datetime.utcnow() + timedelta(minutes=30)
         send_vault_lockout_alert(user)
     elif user.failed_attempts == 3:
-        user.lock_until = datetime.now() + timedelta(hours=24)
+        user.lock_until = datetime.utcnow() + timedelta(hours=24)
         send_vault_lockout_alert(user)
     elif user.failed_attempts == 4:
-        user.lock_until = datetime.now() + timedelta(days=7)
+        user.lock_until = datetime.utcnow() + timedelta(days=7)
         send_vault_lockout_alert(user)
     elif user.failed_attempts >= 5:
-        user.lock_until = datetime.now() + timedelta(days=365)
+        user.lock_until = datetime.utcnow() + timedelta(days=365)
         send_vault_lockout_alert(user, permanent=True)
         db_session.commit()
         session.clear()
@@ -847,17 +851,17 @@ def apply_vault_lockout(user):
     return True
 
 def apply_secret_lockout(user):
-    if user.secret_lock_until and user.secret_lock_until <= datetime.now():
+    if user.secret_lock_until and user.secret_lock_until <= datetime.utcnow():
         user.secret_failed_attempts = 0
         user.secret_lock_until = None
 
     user.secret_failed_attempts += 1
     if user.secret_failed_attempts == 2:
-        user.secret_lock_until = datetime.now() + timedelta(minutes=30)
+        user.secret_lock_until = datetime.utcnow() + timedelta(minutes=30)
     elif user.secret_failed_attempts == 3:
-        user.secret_lock_until = datetime.now() + timedelta(hours=24)
+        user.secret_lock_until = datetime.utcnow() + timedelta(hours=24)
     elif user.secret_failed_attempts == 4:
-        user.secret_lock_until = datetime.now() + timedelta(days=7)
+        user.secret_lock_until = datetime.utcnow() + timedelta(days=7)
     elif user.secret_failed_attempts >= 5:
         user.secret_reauthentication_required = True
         user.secret_lock_until = None
@@ -879,7 +883,7 @@ def log_activity(session_id, action, details=""):
         if not session_id:
             return
         key = f"{ACTIVITY_LOG_PREFIX}{session_id}"
-        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
         entry = f"[{ts}] {action}" + (f" -- {details}" if details else "")
         redis_client.rpush(key, entry)
         redis_client.expire(key, ACTIVITY_LOG_TTL)
@@ -926,7 +930,7 @@ def before_request():
         flash('User not found.', 'danger')
         return redirect(url_for('login'))
 
-    if user.logout_cooldown_until and user.logout_cooldown_until > datetime.now():
+    if user.logout_cooldown_until and user.logout_cooldown_until > datetime.utcnow():
         if request.endpoint not in ['logout', 'terminate_sessions', 'request_logout_link']:
             flash('Account temporarily locked for security.', 'danger')
             return redirect(url_for('login'))
@@ -1080,7 +1084,7 @@ def send_login_otp():
     email = raw_email.strip().lower()
     user = db_session.query(User).filter_by(email_index=make_email_index(email)).first()
 
-    if user and not (user.logout_cooldown_until and user.logout_cooldown_until > datetime.now()):
+    if user and not (user.logout_cooldown_until and user.logout_cooldown_until > datetime.utcnow()):
         code_str = f"{secrets.randbelow(1000000):06d}"
         login_otp.set_otp(email, code_str, prefix=RedisOTP.LOGIN_PREFIX)
         ip = request.remote_addr
@@ -1091,7 +1095,7 @@ def send_login_otp():
             "Request Details:\n"
             "- Event: Account Authentication\n"
             f"- Location: {loc} (IP: {ip})\n"
-            f"- Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+            f"- Time: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
             "Didn't request this code? Please secure your account immediately.\n\n"
             "— ZK Vault Team"
         )
@@ -1125,7 +1129,7 @@ def verify_login():
         return redirect(url_for('login'))
 
     user = db_session.query(User).filter_by(email_index=make_email_index(email)).first()
-    if not user or (user.logout_cooldown_until and user.logout_cooldown_until > datetime.now()):
+    if not user or (user.logout_cooldown_until and user.logout_cooldown_until > datetime.utcnow()):
         flash('Invalid email or OTP.', 'danger')
         session['login_step'] = 'otp'
         return redirect(url_for('login'))
@@ -1213,7 +1217,7 @@ def request_signup_otp():
             "Request Details:\n"
             "- Event: Account Authentication (via Signup)\n"
             f"- Location: {loc} (IP: {ip})\n"
-            f"- Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+            f"- Time: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
             "— ZK Vault Team"
         )
         send_email(raw_email, '[ZK Vault] Login Verification Code', body, sync=True)
@@ -1232,7 +1236,7 @@ def request_signup_otp():
         "Request Details:\n"
         "- Event: Registration Verification\n"
         f"- Location: {loc} (IP: {ip})\n"
-        f"- Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+        f"- Time: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
         "Didn't request this code? You can safely ignore this email.\n\n"
         "— ZK Vault Team"
     )
@@ -1258,7 +1262,7 @@ def verify_signup_otp():
     ok, msg = signup_otp.verify_otp(email, otp)
     if ok:
         session['signup_verified_email'] = email
-        session['signup_verified_at'] = datetime.now().isoformat()
+        session['signup_verified_at'] = datetime.utcnow().isoformat()
         flash('Email verified! Now set your vault password.', 'success')
         return redirect(url_for('set_password'))
     flash(msg, 'danger')
@@ -1384,7 +1388,7 @@ def request_logout_link():
     if not user:
         session.clear()
         return redirect(url_for('login'))
-    if user.logout_cooldown_until and user.logout_cooldown_until > datetime.now():
+    if user.logout_cooldown_until and user.logout_cooldown_until > datetime.utcnow():
         flash('Account temporarily locked.', 'danger')
         return redirect(url_for('login'))
     try:
@@ -1400,7 +1404,7 @@ def request_logout_link():
             "Request Details:\n"
             "- Event: Session Termination Request\n"
             f"- Location: {loc} (IP: {ip})\n"
-            f"- Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+            f"- Time: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
             "— ZK Vault Team"
         )
         send_email(safe_decrypt_email(user.encrypted_email),
@@ -1422,7 +1426,7 @@ def terminate_sessions(token):
         user = db_session.query(User).filter_by(id=user_id).first()
         if user:
             clear_user_sessions(user_id)
-            user.logout_cooldown_until = datetime.now() + timedelta(minutes=15)
+            user.logout_cooldown_until = datetime.utcnow() + timedelta(minutes=15)
             db_session.commit()
             send_session_terminated_alert(user, 15)
         session.clear()
@@ -1495,7 +1499,7 @@ def unlock_vault():
             return jsonify(error='User not found.'), 401
         return redirect(url_for('login'))
 
-    if user.logout_cooldown_until and user.logout_cooldown_until > datetime.now():
+    if user.logout_cooldown_until and user.logout_cooldown_until > datetime.utcnow():
         if request.headers.get('X-Requested-With') == 'XMLHttpRequest' or request.is_json:
             return jsonify(error='Account temporarily locked.'), 403
         flash('Account temporarily locked.', 'danger')
@@ -1515,8 +1519,8 @@ def unlock_vault():
         flash(str(e), 'danger')
         return redirect(url_for('vault'))
 
-    if user.lock_until and user.lock_until > datetime.now():
-        remaining = int((user.lock_until - datetime.now()).total_seconds() // 60)
+    if user.lock_until and user.lock_until > datetime.utcnow():
+        remaining = int((user.lock_until - datetime.utcnow()).total_seconds() // 60)
         msg = f'Vault locked. Try again in {remaining} minutes.'
         if request.headers.get('X-Requested-With') == 'XMLHttpRequest' or request.is_json:
             return jsonify(error=msg), 403
@@ -1829,8 +1833,8 @@ def api_change_password():
         db_session.rollback()
         return jsonify(error='User not found'), 404
 
-    if user.lock_until and user.lock_until > datetime.now():
-        remaining = int((user.lock_until - datetime.now()).total_seconds() // 60)
+    if user.lock_until and user.lock_until > datetime.utcnow():
+        remaining = int((user.lock_until - datetime.utcnow()).total_seconds() // 60)
         db_session.rollback()
         return jsonify(error=f'Vault locked for {remaining} more minutes'), 423
 
@@ -1856,8 +1860,8 @@ def api_change_password():
             db_session.rollback()
             return jsonify(error=str(e)), 400
 
-        if user.secret_lock_until and user.secret_lock_until > datetime.now():
-            remaining = int((user.secret_lock_until - datetime.now()).total_seconds() // 60)
+        if user.secret_lock_until and user.secret_lock_until > datetime.utcnow():
+            remaining = int((user.secret_lock_until - datetime.utcnow()).total_seconds() // 60)
             db_session.rollback()
             return jsonify(error=f'Secret vault locked for {remaining} more minutes'), 423
 
@@ -2024,8 +2028,8 @@ def secret_unlock():
             return jsonify(error='Re-authentication required.'), 403
         flash('Too many failures. Please re-authenticate.', 'danger')
         return redirect(url_for('secret_reauth'))
-    if user.secret_lock_until and user.secret_lock_until > datetime.now():
-        remaining = int((user.secret_lock_until - datetime.now()).total_seconds() // 60)
+    if user.secret_lock_until and user.secret_lock_until > datetime.utcnow():
+        remaining = int((user.secret_lock_until - datetime.utcnow()).total_seconds() // 60)
         msg = f'Secret vault locked. Try again in {remaining} minutes.'
         if request.headers.get('X-Requested-With') == 'XMLHttpRequest' or request.is_json:
             return jsonify(error=msg), 403
@@ -2226,7 +2230,7 @@ def secret_reauth():
             "Request Details:\n"
             "- Event: Secret Vault Re-authentication\n"
             f"- Location: {loc} (IP: {ip})\n"
-            f"- Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+            f"- Time: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
             "— ZK Vault Team"
         )
         sent = send_email(safe_decrypt_email(user.encrypted_email),
