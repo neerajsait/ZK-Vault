@@ -15,26 +15,28 @@
     <div class="auth-card">
         <div class="card-icon">◇</div>
         <h2>Create Account</h2>
-        <p class="card-subtitle">Your data is encrypted locally — we never see your password or your files.</p>
+        <p class="card-subtitle" style="margin-bottom: 1rem;">Your data is encrypted locally — we never see your password or your files.</p>
 
         <form id="signup-form" method="post" action="{{ url_for('request_signup_otp') }}">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <div class="form-group">
-                <label for="email">Email Address</label>
-                <input type="email" id="email" name="email" placeholder="you@example.com" required autofocus>
-            </div>
-            <div class="form-group">
-                <label for="name">Full Name</label>
-                <input type="text" id="name" name="name" placeholder="Jane Doe" required>
+            <div style="display: flex; gap: 1rem; margin-bottom: 0.5rem;">
+                <div class="form-group" style="flex: 1; margin-bottom: 0;">
+                    <label for="email">Email Address</label>
+                    <input type="email" id="email" name="email" placeholder="you@example.com" required autofocus>
+                </div>
+                <div class="form-group" style="flex: 1; margin-bottom: 0;">
+                    <label for="name">Full Name</label>
+                    <input type="text" id="name" name="name" placeholder="Jane Doe" required>
+                </div>
             </div>
             
-            <div class="form-group">
+            <div class="form-group" style="margin-bottom: 0.5rem;">
                 <label>Terms &amp; Conditions</label>
-                <div id="terms-wizard" style="border: 1px solid var(--border); border-radius: var(--radius); padding: 0.85rem; font-size: 0.78rem; line-height: 1.5; color: var(--text-secondary); background: var(--bg-input); position: relative; overflow: hidden; margin-bottom: 1rem;">
+                <div id="terms-wizard" style="border: 1px solid var(--border); border-radius: var(--radius); padding: 0.6rem; font-size: 0.72rem; line-height: 1.4; color: var(--text-secondary); background: var(--bg-input); position: relative; overflow: hidden; margin-bottom: 0.5rem;">
                     
-                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.75rem; border-bottom: 1px solid var(--border-light); padding-bottom: 0.4rem;">
-                        <span style="font-weight: bold; color: var(--white); text-transform: uppercase; font-size: 0.7rem; letter-spacing: 0.05em;">Security &amp; Service Rules</span>
-                        <span id="wizard-step-indicator" style="font-family: var(--font-mono); font-size: 0.7rem; color: var(--text-muted);">Step 1 of 5</span>
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem; border-bottom: 1px solid var(--border-light); padding-bottom: 0.3rem;">
+                        <span style="font-weight: bold; color: var(--white); text-transform: uppercase; font-size: 0.68rem; letter-spacing: 0.05em;">Security &amp; Service Rules</span>
+                        <span id="wizard-step-indicator" style="font-family: var(--font-mono); font-size: 0.68rem; color: var(--text-muted);">Step 1 of 5</span>
                     </div>
 
                     <div id="wizard-steps-container">
@@ -64,17 +66,17 @@
                         </div>
                     </div>
 
-                    <div style="display: flex; justify-content: flex-end; align-items: center; margin-top: 0.85rem; border-top: 1px solid var(--border-light); padding-top: 0.6rem;">
-                        <button type="button" id="wizard-next-btn" class="btn primary" style="padding: 0.35rem 0.75rem; font-size: 0.72rem; min-width: 90px; width: auto;" disabled>
+                    <div style="display: flex; justify-content: flex-end; align-items: center; margin-top: 0.5rem; border-top: 1px solid var(--border-light); padding-top: 0.5rem;">
+                        <button type="button" id="wizard-next-btn" class="btn primary" style="padding: 0.25rem 0.6rem; font-size: 0.68rem; min-width: 90px; width: auto;" disabled>
                             Next (3s)
                         </button>
                     </div>
                 </div>
             </div>
 
-            <div class="form-group" style="display: flex; align-items: center; gap: 0.5rem; margin-top: 1rem; margin-bottom: 1rem;">
+            <div class="form-group" style="display: flex; align-items: center; gap: 0.5rem; margin-top: 0.5rem; margin-bottom: 1rem;">
                 <input type="checkbox" id="agree-terms" disabled style="width: auto; cursor: pointer;">
-                <label for="agree-terms" style="margin-bottom: 0; font-size: 0.78rem; text-transform: none; font-family: var(--font-body); cursor: pointer; color: var(--text-muted);">
+                <label for="agree-terms" style="margin-bottom: 0; font-size: 0.72rem; text-transform: none; font-family: var(--font-body); cursor: pointer; color: var(--text-muted);">
                     I have read and agree to the <a href="{{ url_for('terms') }}" target="_blank" style="color: var(--white); border-bottom: 1px solid var(--border-light);">Terms &amp; Conditions</a>
                 </label>
             </div>
