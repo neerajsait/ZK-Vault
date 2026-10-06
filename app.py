@@ -1508,48 +1508,18 @@ def unlock_vault():
     if request.method == 'GET':
         return redirect(url_for('vault'))
 
-    # POST: client sends verifier only -- never the password
-    verifier_b64 = request.form.get('verifier', '').strip()
-    try:
-        validate_verifier_b64(verifier_b64, 'verifier')
-    except ValueError as e:
-        session['vault_failed_attempt'] = True
-        if request.headers.get('X-Requested-With') == 'XMLHttpRequest' or request.is_json:
-            return jsonify(error=str(e)), 400
-        flash(str(e), 'danger')
-        return redirect(url_for('vault'))
-
-    if user.lock_until and user.lock_until > datetime.utcnow():
-        remaining = int((user.lock_until - datetime.utcnow()).total_seconds() // 60)
-        msg = f'Vault locked. Try again in {remaining} minutes.'
-        if request.headers.get('X-Requested-With') == 'XMLHttpRequest' or request.is_json:
-            return jsonify(error=msg), 403
-        flash(msg, 'danger')
-        return redirect(url_for('vault'))
-
-    if check_verifier(verifier_b64, user.verifier_hash):
-        user = db_session.query(User).filter_by(id=session['user_id']).with_for_update().first()
-        user.failed_attempts = 0
-        user.lock_until = None
-        db_session.commit()
-        session['vault_unlocked'] = True
-        session.pop('after_signup', None)
-        log_activity(session.get('vault_session_id'), "VAULT UNLOCKED")
-        if request.headers.get('X-Requested-With') == 'XMLHttpRequest' or request.is_json or request.accept_mimetypes.accept_json:
-            return jsonify(success=True)
-        flash('Vault unlocked!', 'success')
-        return redirect(url_for('vault'))
-
-    user = db_session.query(User).filter_by(id=session['user_id']).with_for_update().first()
-    if not apply_vault_lockout(user):
-        session['vault_failed_attempt'] = True
-        if request.headers.get('X-Requested-With') == 'XMLHttpRequest' or request.is_json:
-            return jsonify(error='Too many vault unlock failures. Please log in again.', relogin=True), 403
-        return redirect(url_for('login'))
-
-    session['vault_failed_attempt'] = True
-    if request.headers.get('X-Requested-With') == 'XMLHttpRequest' or request.is_json:
-        return jsonify(error='Incorrect vault password.'), 400
+    # True ZK mode: the server does NOT verify the password.
+    # The client derives key1 = Argon2id(password, salt) locally.
+    # We unconditionally unlock the session and serve ciphertext.
+    # If the password was wrong, the client-side AES-GCM decryption will
+    # produce an authentication tag failure and show empty/garbled data.
+    # The server never knows whether the password was correct.
+    session['vault_unlocked'] = True
+    session.pop('after_signup', None)
+    log_activity(session.get('vault_session_id'), "VAULT UNLOCKED (true-ZK mode)")
+    if request.headers.get('X-Requested-With') == 'XMLHttpRequest' or request.is_json or request.accept_mimetypes.accept_json:
+        return jsonify(success=True)
+    flash('Vault unlocked!', 'success')
     return redirect(url_for('vault'))
 
 @app.route('/home', methods=['GET'])
