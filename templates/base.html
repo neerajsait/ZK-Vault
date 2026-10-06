@@ -3,10 +3,11 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#050508">
     <title>{% block title %}ZK Vault{% endblock %}</title>
     <meta name="description" content="Zero-knowledge encrypted vault — your data never leaves your device unencrypted.">
     <meta name="csrf-token" content="{{ csrf_token() }}">
-    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v=8">
     {% block extra_head %}{% endblock %}
 </head>
 <body>
@@ -35,7 +36,7 @@
             }
         }
         </script>
-        <script nonce="{{ csp_nonce }}" type="module" src="{{ url_for('static', filename='index.js') }}"></script>
+        <script nonce="{{ csp_nonce }}" src="{{ url_for('static', filename='index.js') }}?v=4" type="module"></script>
     {% endblock %}
 </body>
 </html>

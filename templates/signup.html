@@ -32,46 +32,38 @@
                 <label>Terms &amp; Conditions</label>
                 <div id="terms-wizard" style="border: 1px solid var(--border); border-radius: var(--radius); padding: 0.85rem; font-size: 0.78rem; line-height: 1.5; color: var(--text-secondary); background: var(--bg-input); position: relative; overflow: hidden; margin-bottom: 1rem;">
                     
-                    <!-- Wizard Header -->
                     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.75rem; border-bottom: 1px solid var(--border-light); padding-bottom: 0.4rem;">
                         <span style="font-weight: bold; color: var(--white); text-transform: uppercase; font-size: 0.7rem; letter-spacing: 0.05em;">Security &amp; Service Rules</span>
                         <span id="wizard-step-indicator" style="font-family: var(--font-mono); font-size: 0.7rem; color: var(--text-muted);">Step 1 of 5</span>
                     </div>
 
-                    <!-- Steps Content -->
                     <div id="wizard-steps-container">
-                        <!-- Step 1 -->
                         <div class="wizard-step active" data-step="1">
                             <p style="margin-bottom: 0.4rem; font-weight: bold; color: var(--white); font-size: 0.82rem;">1. Zero-Knowledge Cryptography</p>
                             <p style="color: var(--text-primary); margin-bottom: 0.4rem;">All encryption keys and master passwords are derived locally in your browser. The server never stores, receives, or has access to your passwords or decrypted files.</p>
                         </div>
                         
-                        <!-- Step 2 -->
                         <div class="wizard-step" data-step="2">
                             <p style="margin-bottom: 0.4rem; font-weight: bold; color: #ff7675; font-size: 0.82rem;">⚠️ 2. Irrecoverable Credentials (CRITICAL)</p>
                             <p style="color: var(--text-primary); margin-bottom: 0.4rem;">Since this service is zero-knowledge, <strong>there is no password reset mechanism</strong>. If you forget your master password, all vault data is lost permanently and cannot be recovered by support or administrators.</p>
                         </div>
                         
-                        <!-- Step 3 -->
                         <div class="wizard-step" data-step="3">
                             <p style="margin-bottom: 0.4rem; font-weight: bold; color: var(--white); font-size: 0.82rem;">3. Data &amp; Storage Limits</p>
                             <p style="color: var(--text-primary); margin-bottom: 0.4rem;">Default account limits allow up to 1,000 records and 100 MB of total vault storage. Storage usage is calculated based on raw client-side ciphertext length.</p>
                         </div>
                         
-                        <!-- Step 4 -->
                         <div class="wizard-step" data-step="4">
                             <p style="margin-bottom: 0.4rem; font-weight: bold; color: var(--white); font-size: 0.82rem;">4. Acceptable Content Policy</p>
                             <p style="color: var(--text-primary); margin-bottom: 0.4rem;">You agree not to store malicious software, illegal material, or use the storage service for unauthorized activities.</p>
                         </div>
                         
-                        <!-- Step 5 -->
                         <div class="wizard-step" data-step="5">
                             <p style="margin-bottom: 0.4rem; font-weight: bold; color: var(--white); font-size: 0.82rem;">5. Service Availability Agreement</p>
                             <p style="color: var(--text-primary); margin-bottom: 0.4rem;">The vault is provided as-is without warranties of uptime. Continued use of the platform constitutes agreement to all these rules.</p>
                         </div>
                     </div>
 
-                    <!-- Wizard Actions -->
                     <div style="display: flex; justify-content: flex-end; align-items: center; margin-top: 0.85rem; border-top: 1px solid var(--border-light); padding-top: 0.6rem;">
                         <button type="button" id="wizard-next-btn" class="btn primary" style="padding: 0.35rem 0.75rem; font-size: 0.72rem; min-width: 90px; width: auto;" disabled>
                             Next (3s)
@@ -106,7 +98,7 @@
         let currentStep = 1;
         let countdownInterval = null;
 
-        // Force disable submit on startup
+        // Initial state
         if (submitBtn) submitBtn.disabled = true;
 
         function startTimer(step) {
@@ -140,19 +132,19 @@
             }, 1000);
         }
 
-        // Start timer for Step 1
+        // Timer init
         startTimer(1);
 
         nextBtn.addEventListener('click', () => {
             if (currentStep < 5) {
-                // Go to next step
+                // Next step
                 document.querySelector(`.wizard-step[data-step="${currentStep}"]`).classList.remove('active');
                 currentStep++;
                 document.querySelector(`.wizard-step[data-step="${currentStep}"]`).classList.add('active');
                 indicator.textContent = `Step ${currentStep} of 5`;
                 startTimer(currentStep);
             } else if (currentStep === 5) {
-                // Finished wizard — enable checkbox for user manual agreement
+                // Accept
                 nextBtn.style.display = 'none';
                 indicator.textContent = 'Finished! Please check the box below ✅';
                 indicator.style.color = '#2ecc71';
@@ -162,7 +154,7 @@
             }
         });
 
-        // Toggle submit button based on checkbox
+        // Toggle submit
         if (checkbox) {
             checkbox.addEventListener('change', () => {
                 if (submitBtn) {

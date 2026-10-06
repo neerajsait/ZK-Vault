@@ -69,13 +69,14 @@ app.config['SESSION_SERIALIZATION_FORMAT'] = 'json'
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=8)
 app.config['TEMPLATES_AUTO_RELOAD'] = app.debug
 
-# Max upload: 5 files x 10 MB raw = 50 MB, but ciphertext is sent as
-# base64-encoded JSON which inflates size by ~33% -> ~66.7 MB, plus JSON
-# envelope overhead. 75 MB gives safe headroom without being too generous.
-app.config['MAX_CONTENT_LENGTH'] = 75 * 1024 * 1024
-
 app.config['MAX_RECORDS_PER_USER'] = int(os.getenv('MAX_RECORDS_PER_USER', 1000))
 app.config['MAX_STORAGE_PER_USER_MB'] = int(os.getenv('MAX_STORAGE_PER_USER_MB', 100))
+
+# The password-change endpoint requires submitting all user records at once.
+# To prevent HTTP 413 Payload Too Large when a user is near their storage quota,
+# MAX_CONTENT_LENGTH must be larger than MAX_STORAGE_PER_USER_MB with some headroom
+# (e.g., to accommodate JSON structure overhead and extra fields).
+app.config['MAX_CONTENT_LENGTH'] = (app.config['MAX_STORAGE_PER_USER_MB'] + 50) * 1024 * 1024
 
 app.config['SESSION_TYPE'] = 'redis'
 app.config['SESSION_REDIS'] = redis.from_url(
@@ -86,9 +87,15 @@ app.config['SESSION_REDIS'] = redis.from_url(
 app.config['SESSION_KEY_PREFIX'] = 'session:'
 app.config['SESSION_USE_SIGNER'] = True
 app.config['SESSION_PERMANENT'] = True
+_force_https = os.getenv('FORCE_HTTPS', 'false').lower() in ('true', '1', 'yes')
 app.config['SESSION_COOKIE_HTTPONLY'] = True
-app.config['SESSION_COOKIE_SECURE'] = True if not app.debug else False
+app.config['SESSION_COOKIE_SECURE'] = _force_https
 app.config['SESSION_COOKIE_SAMESITE'] = 'Strict'
+if _force_https:
+    app.config['SESSION_COOKIE_NAME'] = '__Host-zkv_sess'
+else:
+    app.config['SESSION_COOKIE_NAME'] = 'zkv_sess'
+app.config['SESSION_COOKIE_PATH'] = '/'
 
 Session(app)
 
@@ -122,12 +129,40 @@ Talisman(
 
 @app.after_request
 def add_csp_headers(response):
+    response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    response.headers['Pragma'] = 'no-cache'
+    response.headers['Expires'] = '0'
+    response.headers['Server'] = 'SecurePersonalVault'
+
+    # If redirect or JSON, apply minimal strict CSP.
+    # We must explicitly define form-action, base-uri, object-src, and frame-ancestors
+    # to avoid ZAP's 'Failure to Define Directive with No Fallback' warning.
+    if (300 <= response.status_code < 400) or (response.mimetype == 'application/json'):
+        response.headers['Content-Security-Policy'] = (
+            "default-src 'self'; "
+            "frame-ancestors 'none'; "
+            "form-action 'self'; "
+            "base-uri 'self'; "
+            "object-src 'none'"
+        )
+        return response
+
     nonce = g.get('csp_nonce', '')
+
+    # Only include 'wasm-unsafe-eval' on routes that actually derive keys via Argon2 WASM
+    needs_wasm = False
+    if request.path in ('/set_password', '/vault', '/change_password'):
+        needs_wasm = True
+    elif request.path == '/login' and session.get('login_step') == 'password':
+        needs_wasm = True
+
+    script_sources = ["'self'", f"'nonce-{nonce}'"]
+    if needs_wasm:
+        script_sources.append("'wasm-unsafe-eval'")
+
     policy = {
         'default-src': "'self'",
-        # wasm-unsafe-eval needed for Argon2 WASM in the browser
-        'script-src': ["'self'", f"'nonce-{nonce}'", "'wasm-unsafe-eval'"],
-        # style nonces are strictly enforced to block 'unsafe-inline' style injections
+        'script-src': script_sources,
         'style-src': ["'self'", f"'nonce-{nonce}'"],
         'font-src': "'self'",
         'img-src': "'self' data:",
@@ -140,11 +175,6 @@ def add_csp_headers(response):
     for key, value in policy.items():
         parts.append(f"{key} {' '.join(value) if isinstance(value, list) else value}")
     response.headers['Content-Security-Policy'] = '; '.join(parts)
-    response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
-    response.headers['Pragma'] = 'no-cache'
-    response.headers['Expires'] = '0'
-    # Override server headers to prevent technology/version leaks
-    response.headers['Server'] = 'SecurePersonalVault'
     return response
 
 # Mail
@@ -156,7 +186,14 @@ app.config['MAIL_PASSWORD'] = os.getenv('MAIL_PASSWORD')
 app.config['MAIL_DEFAULT_SENDER'] = os.getenv('MAIL_USERNAME')
 mail = Mail(app)
 
-limiter = Limiter(get_remote_address, app=app, default_limits=["1000 per day", "100 per hour"])
+_redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
+limiter = Limiter(
+    get_remote_address,
+    app=app,
+    default_limits=["10000 per day", "1000 per hour"],
+    storage_uri=_redis_url,
+    storage_options={"protocol": 2},
+)
 
 redis_client = app.config['SESSION_REDIS']
 
@@ -385,9 +422,20 @@ def send_async_email(app, msg):
     with app.app_context():
         try:
             mail.send(msg)
-            logger.info(f"Email sent to {msg.recipients[0]}: {msg.subject}")
+            # Mask recipient to avoid leaking email addresses to log files
+            masked = _mask_email(msg.recipients[0]) if msg.recipients else '[unknown]'
+            logger.info(f"Email sent to {masked}: {msg.subject}")
         except Exception as e:
-            logger.error(f"Failed to send email to {msg.recipients[0]} -- subject: {msg.subject} -- error: {e}", exc_info=True)
+            masked = _mask_email(msg.recipients[0]) if msg.recipients else '[unknown]'
+            logger.error(f"Failed to send email to {masked} -- subject: {msg.subject} -- error: {e}", exc_info=True)
+
+def _mask_email(email: str) -> str:
+    """Mask email address for logging: user@example.com -> u***@example.com"""
+    try:
+        local, domain = email.split('@', 1)
+        return f"{local[0]}***@{domain}"
+    except Exception:
+        return '***'
 
 def send_email(to, subject, body, sync=False) -> bool:
     try:
@@ -395,7 +443,7 @@ def send_email(to, subject, body, sync=False) -> bool:
         msg.body = body
         if sync or app.testing:
             mail.send(msg)
-            logger.info(f"Email sent synchronously to {to}: {subject}")
+            logger.info(f"Email sent synchronously to {_mask_email(to)}: {subject}")
             return True
         else:
             from threading import Thread
@@ -406,7 +454,7 @@ def send_email(to, subject, body, sync=False) -> bool:
             t.start()
             return True
     except Exception as e:
-        logger.error(f"Failed to send email to {to} -- subject: {subject} -- error: {e}", exc_info=True)
+        logger.error(f"Failed to send email to {_mask_email(to)} -- subject: {subject} -- error: {e}", exc_info=True)
         return False
 
 def generate_record_id():
@@ -436,23 +484,12 @@ def _validate_ip(ip_str: str) -> str | None:
 
 def get_ip_location(ip: str | None) -> str:
     """
-    Fetches geographical location for an IP address using ip-api.com (HTTPS).
-    For local development (127.0.0.1 / private IP), resolves public WAN IP
-    so real location is shown during local testing.
+    Fetches geographical location for an IP address using ipapi.co (HTTPS only).
+    For local/private IPs in development, returns a generic label rather than
+    leaking the host's public IP to a third-party service.
     """
-    if request and hasattr(request, 'headers'):
-        forwarded = request.headers.get('X-Forwarded-For')
-        if forwarded:
-            candidate = forwarded.split(',')[0].strip()
-            ip = _validate_ip(candidate) or ip
-
     if not ip or ip == 'localhost' or _is_private_or_local(ip):
-        try:
-            pub_resp = requests.get('https://api.ipify.org?format=json', timeout=2)
-            if pub_resp.status_code == 200:
-                ip = pub_resp.json().get('ip')
-        except Exception:
-            return 'Local Network / Localhost'
+        return 'Local Network / Localhost'
 
     # Final validation: only proceed with a legitimate IP
     ip = _validate_ip(ip) if ip else None
@@ -460,24 +497,22 @@ def get_ip_location(ip: str | None) -> str:
         return 'Unknown Location'
 
     try:
-        # ip-api.com free tier only supports HTTP; validate ip is clean before interpolating
+        # Use HTTPS-only endpoint to protect user IP privacy in transit
         resp = requests.get(
-            f'http://ip-api.com/json/{ip}',
-            params={'fields': 'status,country,regionName,city'},
+            f'https://ipapi.co/{ip}/json/',
             timeout=2,
             allow_redirects=False,
         )
         if resp.status_code == 200:
             data = resp.json()
-            if data.get('status') == 'success':
-                city = data.get('city', '')
-                region = data.get('regionName', '')
-                country = data.get('country', '')
-                parts = [p for p in [city, region, country] if p]
-                if parts:
-                    return ', '.join(parts)
+            city = data.get('city', '')
+            region = data.get('region', '')
+            country = data.get('country_name', '')
+            parts = [p for p in [city, region, country] if p]
+            if parts:
+                return ', '.join(parts)
     except Exception as e:
-        logger.warning(f"Failed to fetch IP location for {ip}: {e}")
+        logger.warning(f"Failed to fetch IP location: {e}")
 
     return 'Unknown Location'
 
@@ -597,7 +632,7 @@ class RedisOTP:
             if attempts > 5:
                 self.delete_otp(email, prefix)
                 return False, "Too many attempts. Please request a new OTP."
-            if data['code'] != str(code):
+            if not hmac.compare_digest(data['code'], str(code)):
                 return False, f"Invalid OTP. {5 - attempts} attempts remaining."
             data['used'] = True
             redis_client.setex(self._get_key(prefix, email), self.OTP_TTL, json.dumps(data))
@@ -683,7 +718,7 @@ def send_login_alert(user, logout_link):
         "Request Details:\n"
         "- Event: Account Login\n"
         f"- Location: {loc} (IP: {ip})\n"
-        f"- Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+        f"- Time: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
         "If this wasn't you, terminate all sessions immediately:\n"
         f"{logout_link}\n\n"
         "— ZK Vault Team"
@@ -693,7 +728,7 @@ def send_login_alert(user, logout_link):
 def send_unified_logout_email(user, session_id, ip_address):
     email = safe_decrypt_email(user.encrypted_email)
     loc = get_ip_location(ip_address)
-    now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    now_str = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
 
     log_entries = get_activity_log(session_id) if session_id else []
 
@@ -730,7 +765,7 @@ def send_session_terminated_alert(user, cooldown_minutes):
         "Request Details:\n"
         "- Event: Session Termination\n"
         f"- Location: {loc} (IP: {ip})\n"
-        f"- Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+        f"- Time: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
         "— ZK Vault Team"
     )
     send_email(email, "[ZK Vault] Security Alert: Sessions Terminated", body)
@@ -744,7 +779,7 @@ def send_account_deletion_alert(email):
         "Request Details:\n"
         "- Event: Account Deletion\n"
         f"- Location: {loc} (IP: {ip})\n"
-        f"- Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+        f"- Time: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
         "— ZK Vault Team"
     )
     send_email(email, "[ZK Vault] Account Deletion Confirmation", body)
@@ -759,7 +794,7 @@ def send_password_changed_alert(user):
         "Request Details:\n"
         "- Event: Password Update\n"
         f"- Location: {loc} (IP: {ip})\n"
-        f"- Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+        f"- Time: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
         "Didn't make this change? Please contact security immediately.\n\n"
         "— ZK Vault Team"
     )
@@ -790,22 +825,22 @@ def send_vault_lockout_alert(user, permanent=False):
 # which releases the row lock.
 
 def apply_vault_lockout(user):
-    if user.lock_until and user.lock_until <= datetime.now():
+    if user.lock_until and user.lock_until <= datetime.utcnow():
         user.failed_attempts = 0
         user.lock_until = None
 
     user.failed_attempts += 1
     if user.failed_attempts == 2:
-        user.lock_until = datetime.now() + timedelta(minutes=30)
+        user.lock_until = datetime.utcnow() + timedelta(minutes=30)
         send_vault_lockout_alert(user)
     elif user.failed_attempts == 3:
-        user.lock_until = datetime.now() + timedelta(hours=24)
+        user.lock_until = datetime.utcnow() + timedelta(hours=24)
         send_vault_lockout_alert(user)
     elif user.failed_attempts == 4:
-        user.lock_until = datetime.now() + timedelta(days=7)
+        user.lock_until = datetime.utcnow() + timedelta(days=7)
         send_vault_lockout_alert(user)
     elif user.failed_attempts >= 5:
-        user.lock_until = datetime.now() + timedelta(days=365)
+        user.lock_until = datetime.utcnow() + timedelta(days=365)
         send_vault_lockout_alert(user, permanent=True)
         db_session.commit()
         session.clear()
@@ -816,17 +851,17 @@ def apply_vault_lockout(user):
     return True
 
 def apply_secret_lockout(user):
-    if user.secret_lock_until and user.secret_lock_until <= datetime.now():
+    if user.secret_lock_until and user.secret_lock_until <= datetime.utcnow():
         user.secret_failed_attempts = 0
         user.secret_lock_until = None
 
     user.secret_failed_attempts += 1
     if user.secret_failed_attempts == 2:
-        user.secret_lock_until = datetime.now() + timedelta(minutes=30)
+        user.secret_lock_until = datetime.utcnow() + timedelta(minutes=30)
     elif user.secret_failed_attempts == 3:
-        user.secret_lock_until = datetime.now() + timedelta(hours=24)
+        user.secret_lock_until = datetime.utcnow() + timedelta(hours=24)
     elif user.secret_failed_attempts == 4:
-        user.secret_lock_until = datetime.now() + timedelta(days=7)
+        user.secret_lock_until = datetime.utcnow() + timedelta(days=7)
     elif user.secret_failed_attempts >= 5:
         user.secret_reauthentication_required = True
         user.secret_lock_until = None
@@ -848,7 +883,7 @@ def log_activity(session_id, action, details=""):
         if not session_id:
             return
         key = f"{ACTIVITY_LOG_PREFIX}{session_id}"
-        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
         entry = f"[{ts}] {action}" + (f" -- {details}" if details else "")
         redis_client.rpush(key, entry)
         redis_client.expire(key, ACTIVITY_LOG_TTL)
@@ -875,16 +910,18 @@ def clear_activity_log(session_id):
 @app.before_request
 def before_request():
     public_endpoints = [
+        'index', 'restart_login',
         'login', 'send_login_otp', 'verify_login',
         'signup', 'request_signup_otp', 'verify_signup_otp',
         'set_password', 'get_signup_salt', 'create_account',
         'static', 'terminate_sessions', 'request_logout_link', 'terms',
+        'robots_txt', 'sitemap_xml',
     ]
     if request.endpoint in public_endpoints:
         return
 
     if 'user_id' not in session:
-        flash('Please log in.', 'warning')
+        flash('Please log in.', 'danger')
         return redirect(url_for('login'))
 
     user = db_session.query(User).filter_by(id=session['user_id']).first()
@@ -893,9 +930,9 @@ def before_request():
         flash('User not found.', 'danger')
         return redirect(url_for('login'))
 
-    if user.logout_cooldown_until and user.logout_cooldown_until > datetime.now():
+    if user.logout_cooldown_until and user.logout_cooldown_until > datetime.utcnow():
         if request.endpoint not in ['logout', 'terminate_sessions', 'request_logout_link']:
-            flash('Account temporarily locked for security.', 'warning')
+            flash('Account temporarily locked for security.', 'danger')
             return redirect(url_for('login'))
 
     unlocked_endpoints = [
@@ -911,7 +948,7 @@ def before_request():
     ]
     if request.endpoint not in unlocked_endpoints:
         if not session.get('vault_unlocked'):
-            flash('Vault is locked. Please unlock first.', 'warning')
+            flash('Vault is locked. Please unlock first.', 'danger')
             return redirect(url_for('unlock_vault'))
 
 @app.teardown_appcontext
@@ -938,7 +975,7 @@ def _error_response(code: int, title: str, message: str):
 def handle_csrf_error(e):
     if _wants_json():
         return jsonify(error='CSRF token missing or invalid. Refresh and retry.'), 403
-    flash('Your session expired. Please try again.', 'warning')
+    flash('Your session expired. Please try again.', 'danger')
     return redirect(url_for('login'))
 
 @app.errorhandler(400)
@@ -1006,11 +1043,22 @@ def handle_all_exceptions(e):
 
 @app.route('/')
 def index():
+    if session.get('user_id') and session.get('vault_unlocked'):
+        return redirect(url_for('vault'))
+    session.pop('login_step', None)
+    return redirect(url_for('login'))
+
+@app.route('/login/restart')
+def restart_login():
+    session.pop('login_step', None)
+    session.pop('login_email', None)
     return redirect(url_for('login'))
 
 @app.route('/login', methods=['GET'])
 def login():
-    step = request.args.get('step', 'email')
+    if request.args:
+        return redirect(url_for('login'))
+    step = session.get('login_step', 'email')
     email = session.get('login_email', '')
     salt = ''
     if step in ('otp', 'password') and email:
@@ -1021,19 +1069,22 @@ def login():
     return render_template('login.html', step=step, email=email, salt=salt, after_signup=after_signup)
 
 @app.route('/send_login_otp', methods=['POST'])
-@limiter.limit("5 per minute")
+@limiter.limit("3 per minute")
+@limiter.limit("1 per 30 seconds", key_func=lambda: request.form.get('email', ''))
+@limiter.limit("8 per hour", key_func=lambda: request.form.get('email', ''))
 def send_login_otp():
     raw_email = request.form.get('email')
     try:
         validate_email(raw_email, check_disposable=False)
     except ValueError:
-        flash('Invalid email or OTP.', 'warning')
-        return redirect(url_for('login', step='email'))
+        flash('Invalid email or OTP.', 'danger')
+        session['login_step'] = 'email'
+        return redirect(url_for('login'))
 
     email = raw_email.strip().lower()
     user = db_session.query(User).filter_by(email_index=make_email_index(email)).first()
 
-    if user and not (user.logout_cooldown_until and user.logout_cooldown_until > datetime.now()):
+    if user and not (user.logout_cooldown_until and user.logout_cooldown_until > datetime.utcnow()):
         code_str = f"{secrets.randbelow(1000000):06d}"
         login_otp.set_otp(email, code_str, prefix=RedisOTP.LOGIN_PREFIX)
         ip = request.remote_addr
@@ -1044,14 +1095,15 @@ def send_login_otp():
             "Request Details:\n"
             "- Event: Account Authentication\n"
             f"- Location: {loc} (IP: {ip})\n"
-            f"- Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+            f"- Time: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
             "Didn't request this code? Please secure your account immediately.\n\n"
             "— ZK Vault Team"
         )
         sent = send_email(email, '[ZK Vault] Login Verification Code', body)
         if not sent:
             flash('Failed to send login verification code email. Please try again.', 'danger')
-            return redirect(url_for('login', step='email'))
+            session['login_step'] = 'email'
+            return redirect(url_for('login'))
     else:
         # Non-existing user: do equivalent-shaped work to reduce timing asymmetry.
         dummy_code_str = f"{secrets.randbelow(1000000):06d}"
@@ -1061,9 +1113,10 @@ def send_login_otp():
         except RedisError:
             pass
 
-    flash('If the email is registered, an OTP will be sent.', 'info')
+    flash('If the email is registered, an OTP will be sent.', 'success')
     session['login_email'] = email
-    return redirect(url_for('login', step='otp'))
+    session['login_step'] = 'otp'
+    return redirect(url_for('login'))
 
 @app.route('/verify_login', methods=['POST'])
 @limiter.limit("10 per minute")
@@ -1072,17 +1125,20 @@ def verify_login():
     otp = request.form.get('otp')
     if not email or not otp:
         flash('Invalid email or OTP.', 'danger')
-        return redirect(url_for('login', step='otp'))
+        session['login_step'] = 'otp'
+        return redirect(url_for('login'))
 
     user = db_session.query(User).filter_by(email_index=make_email_index(email)).first()
-    if not user or (user.logout_cooldown_until and user.logout_cooldown_until > datetime.now()):
+    if not user or (user.logout_cooldown_until and user.logout_cooldown_until > datetime.utcnow()):
         flash('Invalid email or OTP.', 'danger')
-        return redirect(url_for('login', step='otp'))
+        session['login_step'] = 'otp'
+        return redirect(url_for('login'))
 
     ok, msg = login_otp.verify_otp(email, otp, prefix=RedisOTP.LOGIN_PREFIX)
     if not ok:
         flash('Invalid email or OTP.', 'danger')
-        return redirect(url_for('login', step='otp'))
+        session['login_step'] = 'otp'
+        return redirect(url_for('login'))
 
     after_signup = session.get('after_signup', False)
     # Session fixation protection
@@ -1113,7 +1169,18 @@ def verify_login():
         logger.error(f"Login alert failed: {e}")
 
     flash('OTP verified! Please enter your master password.', 'success')
-    return redirect(url_for('login', step='password'))
+    session['login_step'] = 'password'
+    return redirect(url_for('login'))
+
+# ---- Static crawlers / bot files ----
+
+@app.route('/robots.txt')
+def robots_txt():
+    return "User-agent: *\nDisallow: /", 200, {'Content-Type': 'text/plain'}
+
+@app.route('/sitemap.xml')
+def sitemap_xml():
+    return '<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"></urlset>', 200, {'Content-Type': 'application/xml'}
 
 # ---- Signup ----
 
@@ -1134,7 +1201,7 @@ def request_signup_otp():
         validate_email(raw_email)
         validate_name(name)
     except ValueError:
-        flash("Invalid email or name.", 'warning')
+        flash("Invalid email or name.", 'danger')
         return render_template('signup.html')
 
     user_exists = bool(db_session.query(User).filter_by(email_index=make_email_index(raw_email)).first())
@@ -1150,13 +1217,14 @@ def request_signup_otp():
             "Request Details:\n"
             "- Event: Account Authentication (via Signup)\n"
             f"- Location: {loc} (IP: {ip})\n"
-            f"- Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+            f"- Time: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
             "— ZK Vault Team"
         )
         send_email(raw_email, '[ZK Vault] Login Verification Code', body, sync=True)
         session['login_email'] = raw_email
-        flash('An account with this email already exists. A login verification code has been sent to your email.', 'info')
-        return redirect(url_for('login', step='otp'))
+        flash('An account with this email already exists. A login verification code has been sent to your email.', 'success')
+        session['login_step'] = 'otp'
+        return redirect(url_for('login'))
 
     code_str = f"{secrets.randbelow(1000000):06d}"
     signup_otp.set_otp(raw_email, code_str)
@@ -1168,7 +1236,7 @@ def request_signup_otp():
         "Request Details:\n"
         "- Event: Registration Verification\n"
         f"- Location: {loc} (IP: {ip})\n"
-        f"- Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+        f"- Time: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
         "Didn't request this code? You can safely ignore this email.\n\n"
         "— ZK Vault Team"
     )
@@ -1194,7 +1262,7 @@ def verify_signup_otp():
     ok, msg = signup_otp.verify_otp(email, otp)
     if ok:
         session['signup_verified_email'] = email
-        session['signup_verified_at'] = datetime.now().isoformat()
+        session['signup_verified_at'] = datetime.utcnow().isoformat()
         flash('Email verified! Now set your vault password.', 'success')
         return redirect(url_for('set_password'))
     flash(msg, 'danger')
@@ -1203,7 +1271,7 @@ def verify_signup_otp():
 @app.route('/set_password', methods=['GET'])
 def set_password():
     if 'signup_verified_email' not in session:
-        flash('Please verify your email first.', 'warning')
+        flash('Please verify your email first.', 'danger')
         return redirect(url_for('signup'))
     return render_template('set_password.html', email=session['signup_verified_email'])
 
@@ -1231,7 +1299,7 @@ def get_signup_salt():
 @limiter.limit("5 per minute")
 def create_account():
     if 'signup_verified_email' not in session:
-        flash('Email verification required.', 'warning')
+        flash('Email verification required.', 'danger')
         return redirect(url_for('signup'))
 
     verifier_b64 = request.form.get('verifier', '').strip()
@@ -1243,7 +1311,7 @@ def create_account():
 
     salt_b64 = session.pop('pending_salt', None)
     if not salt_b64:
-        flash('Session expired. Please start again.', 'warning')
+        flash('Session expired. Please start again.', 'danger')
         return redirect(url_for('set_password'))
 
     email = session['signup_verified_email']
@@ -1314,14 +1382,14 @@ def create_account():
 @limiter.limit("5 per hour")
 def request_logout_link():
     if 'user_id' not in session:
-        flash('Please log in.', 'warning')
+        flash('Please log in.', 'danger')
         return redirect(url_for('login'))
     user = db_session.query(User).filter_by(id=session['user_id']).first()
     if not user:
         session.clear()
         return redirect(url_for('login'))
-    if user.logout_cooldown_until and user.logout_cooldown_until > datetime.now():
-        flash('Account temporarily locked.', 'warning')
+    if user.logout_cooldown_until and user.logout_cooldown_until > datetime.utcnow():
+        flash('Account temporarily locked.', 'danger')
         return redirect(url_for('login'))
     try:
         token = generate_logout_token(user.id)
@@ -1336,7 +1404,7 @@ def request_logout_link():
             "Request Details:\n"
             "- Event: Session Termination Request\n"
             f"- Location: {loc} (IP: {ip})\n"
-            f"- Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+            f"- Time: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
             "— ZK Vault Team"
         )
         send_email(safe_decrypt_email(user.encrypted_email),
@@ -1350,19 +1418,31 @@ def request_logout_link():
 
 @app.route('/terminate_sessions/<token>', methods=['GET', 'POST'])
 def terminate_sessions(token):
-    user_id = consume_logout_token(token)
-    if not user_id:
-        flash('Invalid or expired session termination link.', 'danger')
+    if request.method == 'POST':
+        user_id = consume_logout_token(token)
+        if not user_id:
+            flash('Invalid or expired session termination link.', 'danger')
+            return redirect(url_for('login'))
+        user = db_session.query(User).filter_by(id=user_id).first()
+        if user:
+            clear_user_sessions(user_id)
+            user.logout_cooldown_until = datetime.utcnow() + timedelta(minutes=15)
+            db_session.commit()
+            send_session_terminated_alert(user, 15)
+        session.clear()
+        flash('All active sessions have been terminated.', 'success')
         return redirect(url_for('login'))
-    user = db_session.query(User).filter_by(id=user_id).first()
-    if user:
-        clear_user_sessions(user_id)
-        user.logout_cooldown_until = datetime.now() + timedelta(minutes=15)
-        db_session.commit()
-        send_session_terminated_alert(user, 15)
-    session.clear()
-    flash('All active sessions have been terminated.', 'info')
-    return redirect(url_for('login'))
+    else:
+        user_id = get_user_id_from_logout_token(token)
+        if not user_id:
+            flash('Invalid or expired session termination link.', 'danger')
+            return redirect(url_for('login'))
+        user = db_session.query(User).filter_by(id=user_id).first()
+        if not user:
+            flash('User not found.', 'danger')
+            return redirect(url_for('login'))
+        email = safe_decrypt_email(user.encrypted_email)
+        return render_template('confirm_terminate.html', token=token, email=email)
 
 
 
@@ -1384,8 +1464,13 @@ def terminate_sessions(token):
 @limiter.limit("1000 per day")
 def vault():
     if 'user_id' not in session:
-        flash('Please log in.', 'warning')
+        flash('Please log in.', 'danger')
         return redirect(url_for('login'))
+        
+    if not session.get('vault_unlocked') and not session.get('vault_failed_attempt'):
+        session['login_step'] = 'password'
+        return redirect(url_for('login'))
+
     user = db_session.query(User).filter_by(id=session['user_id']).first()
     if not user:
         session.clear()
@@ -1404,7 +1489,7 @@ def unlock_vault():
     if 'user_id' not in session:
         if request.headers.get('X-Requested-With') == 'XMLHttpRequest' or request.is_json:
             return jsonify(error='Please log in.'), 401
-        flash('Please log in.', 'warning')
+        flash('Please log in.', 'danger')
         return redirect(url_for('login'))
 
     user = db_session.query(User).filter_by(id=session['user_id']).first()
@@ -1414,10 +1499,10 @@ def unlock_vault():
             return jsonify(error='User not found.'), 401
         return redirect(url_for('login'))
 
-    if user.logout_cooldown_until and user.logout_cooldown_until > datetime.now():
+    if user.logout_cooldown_until and user.logout_cooldown_until > datetime.utcnow():
         if request.headers.get('X-Requested-With') == 'XMLHttpRequest' or request.is_json:
             return jsonify(error='Account temporarily locked.'), 403
-        flash('Account temporarily locked.', 'warning')
+        flash('Account temporarily locked.', 'danger')
         return redirect(url_for('login'))
 
     if request.method == 'GET':
@@ -1428,13 +1513,14 @@ def unlock_vault():
     try:
         validate_verifier_b64(verifier_b64, 'verifier')
     except ValueError as e:
+        session['vault_failed_attempt'] = True
         if request.headers.get('X-Requested-With') == 'XMLHttpRequest' or request.is_json:
             return jsonify(error=str(e)), 400
         flash(str(e), 'danger')
         return redirect(url_for('vault'))
 
-    if user.lock_until and user.lock_until > datetime.now():
-        remaining = int((user.lock_until - datetime.now()).total_seconds() // 60)
+    if user.lock_until and user.lock_until > datetime.utcnow():
+        remaining = int((user.lock_until - datetime.utcnow()).total_seconds() // 60)
         msg = f'Vault locked. Try again in {remaining} minutes.'
         if request.headers.get('X-Requested-With') == 'XMLHttpRequest' or request.is_json:
             return jsonify(error=msg), 403
@@ -1456,10 +1542,12 @@ def unlock_vault():
 
     user = db_session.query(User).filter_by(id=session['user_id']).with_for_update().first()
     if not apply_vault_lockout(user):
+        session['vault_failed_attempt'] = True
         if request.headers.get('X-Requested-With') == 'XMLHttpRequest' or request.is_json:
             return jsonify(error='Too many vault unlock failures. Please log in again.', relogin=True), 403
         return redirect(url_for('login'))
 
+    session['vault_failed_attempt'] = True
     if request.headers.get('X-Requested-With') == 'XMLHttpRequest' or request.is_json:
         return jsonify(error='Incorrect vault password.'), 400
     return redirect(url_for('vault'))
@@ -1513,7 +1601,7 @@ def api_list_records():
                     for r in records])
 
 @app.route('/api/records', methods=['POST'])
-@limiter.limit("100 per hour")
+@limiter.limit("1000 per hour")
 def api_create_record():
     """
     Expects JSON: { "ciphertext": "<base64 AES-GCM blob>" }
@@ -1641,6 +1729,7 @@ def api_delete_record(record_id):
 # the ciphertext (full ZK choice). The JS fetch handler should trigger a
 # download using the decrypted filename after decryption.
 @app.route('/api/records/<record_id>/file/<int:file_index>', methods=['GET'])
+@limiter.limit("200 per hour")
 def api_download_file(record_id, file_index):
     user, err = _require_vault_unlocked()
     if err:
@@ -1744,8 +1833,8 @@ def api_change_password():
         db_session.rollback()
         return jsonify(error='User not found'), 404
 
-    if user.lock_until and user.lock_until > datetime.now():
-        remaining = int((user.lock_until - datetime.now()).total_seconds() // 60)
+    if user.lock_until and user.lock_until > datetime.utcnow():
+        remaining = int((user.lock_until - datetime.utcnow()).total_seconds() // 60)
         db_session.rollback()
         return jsonify(error=f'Vault locked for {remaining} more minutes'), 423
 
@@ -1771,8 +1860,8 @@ def api_change_password():
             db_session.rollback()
             return jsonify(error=str(e)), 400
 
-        if user.secret_lock_until and user.secret_lock_until > datetime.now():
-            remaining = int((user.secret_lock_until - datetime.now()).total_seconds() // 60)
+        if user.secret_lock_until and user.secret_lock_until > datetime.utcnow():
+            remaining = int((user.secret_lock_until - datetime.utcnow()).total_seconds() // 60)
             db_session.rollback()
             return jsonify(error=f'Secret vault locked for {remaining} more minutes'), 423
 
@@ -1868,7 +1957,7 @@ def secret_setup():
     if 'user_id' not in session:
         if request.headers.get('X-Requested-With') == 'XMLHttpRequest' or request.is_json:
             return jsonify(error='Please log in.'), 401
-        flash('Please log in.', 'warning')
+        flash('Please log in.', 'danger')
         return redirect(url_for('login'))
     user = db_session.query(User).filter_by(id=session['user_id']).first()
     if not user:
@@ -1878,7 +1967,7 @@ def secret_setup():
     if user.secret_salt:
         if request.headers.get('X-Requested-With') == 'XMLHttpRequest' or request.is_json:
             return jsonify(error='Secret vault already set up.'), 400
-        flash('Secret vault already set up.', 'info')
+        flash('Secret vault already set up.', 'success')
         return redirect(url_for('secret_unlock'))
 
     if request.method == 'GET':
@@ -1922,7 +2011,7 @@ def secret_unlock():
     if 'user_id' not in session:
         if request.headers.get('X-Requested-With') == 'XMLHttpRequest' or request.is_json:
             return jsonify(error='Please log in.'), 401
-        flash('Please log in.', 'warning')
+        flash('Please log in.', 'danger')
         return redirect(url_for('login'))
     user = db_session.query(User).filter_by(id=session['user_id']).first()
     if not user:
@@ -1932,15 +2021,15 @@ def secret_unlock():
     if not user.secret_salt:
         if request.headers.get('X-Requested-With') == 'XMLHttpRequest' or request.is_json:
             return jsonify(error='Secret vault not set up.'), 400
-        flash('Secret vault not set up. Please set it up first.', 'info')
+        flash('Secret vault not set up. Please set it up first.', 'success')
         return redirect(url_for('secret_setup'))
     if user.secret_reauthentication_required:
         if request.headers.get('X-Requested-With') == 'XMLHttpRequest' or request.is_json:
             return jsonify(error='Re-authentication required.'), 403
-        flash('Too many failures. Please re-authenticate.', 'warning')
+        flash('Too many failures. Please re-authenticate.', 'danger')
         return redirect(url_for('secret_reauth'))
-    if user.secret_lock_until and user.secret_lock_until > datetime.now():
-        remaining = int((user.secret_lock_until - datetime.now()).total_seconds() // 60)
+    if user.secret_lock_until and user.secret_lock_until > datetime.utcnow():
+        remaining = int((user.secret_lock_until - datetime.utcnow()).total_seconds() // 60)
         msg = f'Secret vault locked. Try again in {remaining} minutes.'
         if request.headers.get('X-Requested-With') == 'XMLHttpRequest' or request.is_json:
             return jsonify(error=msg), 403
@@ -2014,6 +2103,8 @@ def api_user_quota():
 def _require_secret_unlocked():
     if 'user_id' not in session:
         return None, (jsonify(error='Please log in.'), 401)
+    if not session.get('secret_unlocked'):
+        return None, (jsonify(error='Secret vault locked'), 403)
     user = db_session.query(User).filter_by(id=session['user_id']).first()
     if not user:
         return None, (jsonify(error='User not found'), 403)
@@ -2036,7 +2127,7 @@ def api_list_secret_records():
                     for r in records])
 
 @app.route('/api/secret/records', methods=['POST'])
-@limiter.limit("100 per hour")
+@limiter.limit("1000 per hour")
 def api_create_secret_record():
     user, err = _require_secret_unlocked()
     if err:
@@ -2111,14 +2202,14 @@ SECRET_REAUTH_OTP_TTL = 600
 def secret_reauth():
     uid = session.get('user_id')
     if not uid:
-        flash('Please log in.', 'warning')
+        flash('Please log in.', 'danger')
         return redirect(url_for('login'))
     user = db_session.query(User).filter_by(id=uid).first()
     if not user:
         session.clear()
         return redirect(url_for('login'))
     if not user.secret_reauthentication_required:
-        flash('Re-authentication not required.', 'info')
+        flash('Re-authentication not required.', 'success')
         return redirect(url_for('secret_unlock'))
 
     if request.method == 'POST':
@@ -2139,7 +2230,7 @@ def secret_reauth():
             "Request Details:\n"
             "- Event: Secret Vault Re-authentication\n"
             f"- Location: {loc} (IP: {ip})\n"
-            f"- Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+            f"- Time: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
             "— ZK Vault Team"
         )
         sent = send_email(safe_decrypt_email(user.encrypted_email),
@@ -2158,7 +2249,7 @@ def secret_reauth():
 def secret_reauth_verify():
     uid = session.get('user_id')
     if not uid:
-        flash('Please log in.', 'warning')
+        flash('Please log in.', 'danger')
         return redirect(url_for('login'))
     user = db_session.query(User).filter_by(id=uid).first()
     if not user:
@@ -2216,10 +2307,10 @@ def secret_reauth_verify():
 def delete_account():
     uid = session.get('user_id')
     if not uid:
-        flash('Please log in.', 'warning')
+        flash('Please log in.', 'danger')
         return redirect(url_for('login'))
     if not session.get('vault_unlocked'):
-        flash('Please unlock your vault first.', 'warning')
+        flash('Please unlock your vault first.', 'danger')
         return redirect(url_for('unlock_vault'))
 
     user = db_session.query(User).filter_by(id=uid).first()
@@ -2247,7 +2338,7 @@ def delete_account():
     db_session.commit()
     send_account_deletion_alert(user_email)
     session.clear()
-    flash('Account deleted.', 'info')
+    flash('Account deleted.', 'success')
     return redirect(url_for('login'))
 
 # ----------------------------------------------------------------------
@@ -2267,7 +2358,7 @@ def logout():
             if hasattr(session, 'sid'):
                 remove_user_session(uid, session.sid)
     session.clear()
-    flash('Logged out.', 'info')
+    flash('Logged out.', 'success')
     return redirect(url_for('login'))
 
 # Monkeypatch Werkzeug to obfuscate the Server header version information

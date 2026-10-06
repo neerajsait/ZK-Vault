@@ -1,12 +1,5 @@
 /**
- * index.js — SPA Vault Controller with Pure In-Memory Key Management
- *
- * ZERO-KNOWLEDGE ARCHITECTURE:
- * 1. Master encryption keys (key1, secretKey) are kept STRICTLY in JS variable memory
- *    (via vault-crypto.js's in-memory vaultKeys object).
- * 2. NO sessionStorage, NO localStorage, NO IndexedDB key storage.
- * 3. Refreshing the browser or leaving /vault wipes JS memory, requiring
- *    the user to re-enter their password to unlock the vault.
+ * index.js — SPA Vault Controller
  */
 
 import {
@@ -105,19 +98,19 @@ async function apiFetch(url, options = {}) {
 function showSection(sectionName) {
     const key1 = getVaultKey1();
     
-    // Guard: require vault key before allowing access to secret or change-password
+    // Section guard
     if (!key1 && ['secret', 'change-password'].includes(sectionName)) {
         sectionName = 'unlock';
     }
 
-    // Toggle section visibility
+    // Toggle visibility
     $$('.spa-section').forEach(sec => {
         sec.classList.remove('active');
     });
     const targetSec = $(`#sec-${sectionName}`);
     if (targetSec) targetSec.classList.add('active');
 
-    // Update nav tabs styling
+    // Update navigation
     $$('.tab-btn').forEach(btn => {
         btn.classList.remove('active');
         if (btn.dataset.section === sectionName) {
@@ -125,25 +118,28 @@ function showSection(sectionName) {
         }
     });
 
-    // Update tab disabled states based on lock status
+    // Update tab states
     const isUnlocked = Boolean(key1);
     $('#tab-records-btn')?.classList.toggle('disabled', false);
     $('#tab-secret-btn')?.classList.toggle('disabled', !isUnlocked);
     $('#tab-change-pw-btn')?.classList.toggle('disabled', !isUnlocked);
 
-    // Update status badge
+    // Update badge
     const badge = $('#lock-status-badge');
+    const unlockTab = $('#tab-unlock-btn');
     if (badge) {
         if (isUnlocked) {
             badge.textContent = '● Unlocked (Decrypted)';
             badge.className = 'lock-badge unlocked';
+            if (unlockTab) unlockTab.innerHTML = '⊘ Lock';
         } else {
             badge.textContent = '● Encrypted Mode';
             badge.className = 'lock-badge locked';
+            if (unlockTab) unlockTab.innerHTML = '◉ Unlock';
         }
     }
 
-    // Load data if switching to active sections
+    // Fetch data
     if (sectionName === 'records') {
         loadRecords();
         updateQuota();
@@ -189,7 +185,7 @@ async function updateQuota() {
             fill.style.width = `${pct}%`;
         }
     } catch (err) {
-        // Quota fetch warning caught gracefully
+        // Graceful catch
     }
 }
 
@@ -223,13 +219,8 @@ function setupUnlockForm() {
         showStatus(statusEl, 'Deriving encryption key in memory (Argon2id)…', false);
 
         try {
-            // 1. Derive key1 in memory
             const key1Bytes = await deriveKeyFromPassword(pwd, saltB64);
-
-            // 2. Derive login verifier
             const verifierB64 = await deriveLoginVerifier(key1Bytes);
-
-            // 3. Post verifier to server
             const formData = new FormData();
             formData.append('verifier', verifierB64);
 
@@ -246,7 +237,6 @@ function setupUnlockForm() {
             const data = await resp.json().catch(() => ({}));
 
             if (resp.ok && data.success) {
-                // SUCCESS: Store key1 ONLY in JS variable memory!
                 setVaultKey1(key1Bytes);
                 pwdInput.value = '';
                 showStatus(statusEl, 'Vault unlocked successfully!', false, true);
@@ -286,6 +276,21 @@ async function loadRecords() {
         const data = await apiFetch('/api/records');
         if (!data || data.length === 0) {
             cachedNormalRecords = [];
+            
+            if (key1 && sessionStorage.getItem('_create_welcome_record') === 'true') {
+                sessionStorage.removeItem('_create_welcome_record');
+                try {
+                    list.innerHTML = '<div class="loading">Creating welcome record…</div>';
+                    const welcomeTitle = "Welcome to ZK Vault";
+                    const welcomeNotes = "Your account has been successfully created and your encryption keys have been derived!\n\nThis record is encrypted with your master password. Only you can read it. You can delete this record whenever you like.";
+                    const ciphertext = await encryptRecord(key1, { title: welcomeTitle, notes: welcomeNotes, files: [] });
+                    await apiFetch('/api/records', { method: 'POST', body: { ciphertext } });
+                    return loadRecords();
+                } catch (e) {
+                    console.error("Failed to create welcome record", e);
+                }
+            }
+            
             list.innerHTML = '<p style="text-align: center; color: var(--text-secondary); padding: 2rem;">No records found. Click "+ New Record" to create one!</p>';
             return;
         }
@@ -317,7 +322,7 @@ async function loadRecords() {
             cachedNormalRecords = decryptedList;
             renderRecordList(decryptedList, list, false);
         } else {
-            // Encrypted Mode: user entered wrong password or skipped password step
+            // Encrypted mode
             const encryptedList = data.map(rec => ({
                 id: rec.id,
                 title: `🔒 Encrypted Record (${rec.id})`,
@@ -330,18 +335,23 @@ async function loadRecords() {
             cachedNormalRecords = encryptedList;
 
             const bannerHtml = `
-                <div style="background: rgba(255, 170, 0, 0.12); border: 1px solid rgba(255, 170, 0, 0.35); border-radius: var(--radius); padding: 0.85rem 1.25rem; margin-bottom: 1.25rem; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 0.75rem;">
+                <div style="background: rgba(255, 170, 0, 0.05); border: 1px solid rgba(255, 170, 0, 0.2); border-radius: var(--radius-lg); padding: 1.25rem; margin-bottom: 2rem; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 1rem;">
                     <div>
-                        <strong style="color: #f39c12; font-size: 0.85rem;">🔒 Vault Loaded in Encrypted Mode</strong>
-                        <p style="color: var(--text-secondary); font-size: 0.78rem; margin-top: 0.2rem;">Wrong or missing master password. Viewing raw encrypted payloads. Unlock with password to decrypt.</p>
+                        <strong style="color: var(--text-primary); font-size: 0.95rem;">🔒 Vault Loaded in Encrypted Mode</strong>
+                        <p style="color: var(--text-secondary); font-size: 0.85rem; margin-top: 0.4rem;">Wrong or missing master password. Viewing raw encrypted payloads. Unlock with password to decrypt.</p>
                     </div>
-                    <button type="button" id="btn-switch-to-unlock" class="btn primary" style="padding: 0.4rem 0.85rem; font-size: 0.75rem;">Unlock to Decrypt</button>
+                    <button type="button" id="btn-switch-to-unlock" class="btn primary" style="padding: 0.6rem 1rem; font-size: 0.75rem; margin-top: 0.5rem; margin-bottom: 0.5rem;">Unlock to Decrypt</button>
                 </div>
             `;
             const wrapper = document.createElement('div');
             wrapper.innerHTML = bannerHtml;
             list.innerHTML = '';
             list.appendChild(wrapper.firstElementChild);
+
+            const spacer = document.createElement('div');
+            spacer.style.height = '3rem';
+            spacer.style.width = '100%';
+            list.appendChild(spacer);
 
             const recordsContainer = document.createElement('div');
             list.appendChild(recordsContainer);
@@ -392,7 +402,7 @@ function renderRecordList(records, container, isSecret = false) {
     $$('.unlock-record', container).forEach(btn => btn.addEventListener('click', () => showSection('unlock')));
 }
 
-// Search filtering
+// Search
 function setupSearch() {
     $('#search-records-input')?.addEventListener('input', (e) => {
         const q = e.target.value.toLowerCase().trim();
@@ -418,12 +428,12 @@ function setupRecordModals() {
     const form = $('#record-form');
     const fileInput = $('#record-files');
 
-    // Close buttons
+    // Close handlers
     $('#record-modal-close-x')?.addEventListener('click', () => modal.classList.add('hidden'));
     $('#view-modal-close-x')?.addEventListener('click', () => $('#view-record-modal').classList.add('hidden'));
     $('#view-modal-close-btn')?.addEventListener('click', () => $('#view-record-modal').classList.add('hidden'));
 
-    // File input change
+    // File handler
     fileInput?.addEventListener('change', async (e) => {
         const files = Array.from(e.target.files);
         for (const file of files) {
@@ -437,17 +447,17 @@ function setupRecordModals() {
         renderPendingFiles();
     });
 
-    // Create Normal Record Button
+    // Create record
     $('#create-record-btn')?.addEventListener('click', () => {
         openRecordModal('New Vault Record', '', '', [], false);
     });
 
-    // Create Secret Record Button
+    // Create special record
     $('#create-secret-record-btn')?.addEventListener('click', () => {
         openRecordModal('New Secret Vault Record', '', '', [], true);
     });
 
-    // Save Form Submit
+    // Submit handler
     form?.addEventListener('submit', async (e) => {
         e.preventDefault();
         const recId = $('#record-id').value;
@@ -667,18 +677,15 @@ function setupSecretSetupForm() {
         showStatus(statusEl, 'Initializing secret vault…', false);
 
         try {
-            // 1. Get salt from server
             const saltData = await apiFetch('/secret/setup', { method: 'GET' });
             if (!saltData || !saltData.salt) {
                 throw new Error('Failed to retrieve secret salt');
             }
             const saltB64 = saltData.salt;
 
-            // 2. Derive key2 and secret verifier
             const key2 = await deriveKeyFromPassword(code, saltB64);
             const secretVerifier = await deriveSecretVerifier(key1, key2);
 
-            // 3. Post verifier to server
             const formData = new FormData();
             formData.append('secret_verifier', secretVerifier);
 
@@ -867,15 +874,12 @@ function setupChangePassword() {
         showStatus(statusEl, 'Re-encrypting records in browser… Please do not navigate away.', false);
 
         try {
-            // Derive current key1 to re-read records
             const oldKey1 = await deriveKeyFromPassword(currentPw, saltB64);
 
-            // Generate new salt and key1
             const newSaltB64 = generateSalt();
             const newKey1 = await deriveKeyFromPassword(newPw, newSaltB64);
             const newVerifierB64 = await deriveLoginVerifier(newKey1);
 
-            // Re-encrypt normal records
             const normalRecords = await apiFetch('/api/records');
             const reencryptedNormal = [];
             for (const r of normalRecords) {
@@ -883,8 +887,6 @@ function setupChangePassword() {
                 const enc = await encryptRecord(newKey1, dec);
                 reencryptedNormal.push({ id: r.id, ciphertext: enc });
             }
-
-            // Re-encrypt secret records if applicable
             let reencryptedSecret = [];
             let oldSecretVerifier = null;
             let newSecretVerifier = null;
@@ -923,7 +925,6 @@ function setupChangePassword() {
                 bodyPayload.secret_records = reencryptedSecret;
             }
 
-            // Send re-encrypted payload to backend
             await apiFetch('/api/change_password', {
                 method: 'POST',
                 body: bodyPayload
@@ -1003,15 +1004,12 @@ function setupDeleteAccountModal() {
 // ═══════════════════════════════════════════════════════════════
 
 document.addEventListener('DOMContentLoaded', () => {
-    // Only run SPA vault controller if we are on the vault page
     const isVaultPage = document.querySelector('.spa-container') || document.querySelector('#sec-records');
     if (!isVaultPage) return;
 
-    // Retrieve transient key from sessionStorage if present (e.g. from login/signup redirect)
     try {
         const transientKeyB64 = sessionStorage.getItem('_transient_vault_key');
         if (transientKeyB64) {
-            // Consume immediately — one-time use only
             sessionStorage.removeItem('_transient_vault_key');
             const bin = atob(transientKeyB64);
             const bytes = new Uint8Array(bin.length);
@@ -1024,10 +1022,15 @@ document.addEventListener('DOMContentLoaded', () => {
         console.error('Failed to load transient key from sessionStorage:', e);
     }
 
-    // Top nav tab click handlers
+    // Navigation events
     $$('.tab-btn').forEach(btn => {
         btn.addEventListener('click', (e) => {
             const targetSec = e.currentTarget.dataset.section;
+            if (targetSec === 'unlock' && getVaultKey1()) {
+                clearVaultKeys();
+                showSection('records');
+                return;
+            }
             if (targetSec) showSection(targetSec);
         });
     });
@@ -1040,6 +1043,5 @@ document.addEventListener('DOMContentLoaded', () => {
     setupChangePassword();
     setupDeleteAccountModal();
 
-    // Initial section display: open records section directly (decrypted if key present, else encrypted mode)
     showSection('records');
 });
